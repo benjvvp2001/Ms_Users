@@ -1,0 +1,821 @@
+{
+  "info": {
+    "_postman_id": "1f7a6b8e-2c3d-4a1f-9c2e-sportmatch-users",
+    "name": "SportMatch - users service (Postgres)",
+    "description": "Prueba end-to-end del microservicio de usuarios contra la base de datos PostgreSQL real (users_db), no el repositorio mock. Cada carpeta cubre un grupo de endpoints del contrato /api/v1/users. Los tokens/ids se encadenan automaticamente via variables de entorno.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "01 - Auth",
+      "item": [
+        {
+          "name": "Register User A",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.environment.get('userA_email')) {",
+                  "    pm.environment.set('userA_email', 'qa.ana.' + Date.now() + '@example.com');",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test('returns access token', () => pm.expect(body.access_token).to.be.a('string'));",
+                  "pm.test('role is player', () => pm.expect(body.user.role).to.eql('player'));",
+                  "pm.environment.set('userA_token', body.access_token);",
+                  "pm.environment.set('userA_id', body.user.user_id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{userA_email}}\",\n  \"password\": \"{{userA_password}}\",\n  \"nombre\": \"Ana\",\n  \"apellido_paterno\": \"Torres\",\n  \"apellido_materno\": \"Diaz\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/auth/register",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "auth", "register"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Register User A Duplicate Email (409 esperado)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 409 (email duplicado)', () => pm.response.to.have.status(409));",
+                  "pm.test('detail explains conflict', () => pm.expect(pm.response.json().detail).to.include('registered'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{userA_email}}\",\n  \"password\": \"{{userA_password}}\",\n  \"nombre\": \"Ana\",\n  \"apellido_paterno\": \"Torres\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/auth/register",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "auth", "register"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login User A",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('user_id matches registration', () => pm.expect(body.user.user_id).to.eql(pm.environment.get('userA_id')));",
+                  "pm.environment.set('userA_token', body.access_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{userA_email}}\",\n  \"password\": \"{{userA_password}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "auth", "login"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login User A Wrong Password (401 esperado)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{userA_email}}\",\n  \"password\": \"totally-wrong-password\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "auth", "login"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Register User B",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.environment.get('userB_email')) {",
+                  "    pm.environment.set('userB_email', 'qa.bruno.' + Date.now() + '@example.com');",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.environment.set('userB_token', body.access_token);",
+                  "pm.environment.set('userB_id', body.user.user_id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{userB_email}}\",\n  \"password\": \"{{userB_password}}\",\n  \"nombre\": \"Bruno\",\n  \"apellido_paterno\": \"Rivas\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/auth/register",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "auth", "register"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login User B",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.environment.set('userB_token', pm.response.json().access_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{userB_email}}\",\n  \"password\": \"{{userB_password}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "auth", "login"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login Admin QA (seeded fixture)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('role is admin', () => pm.expect(body.user.role).to.eql('admin'));",
+                  "pm.environment.set('admin_token', body.access_token);",
+                  "pm.environment.set('admin_id', body.user.user_id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{admin_email}}\",\n  \"password\": \"{{admin_password}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "auth", "login"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "02 - Profile",
+      "item": [
+        {
+          "name": "Get Profile - Owner (A)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('rut is null (not provided at register)', () => pm.expect(pm.response.json().rut).to.be.null);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{userA_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{userA_id}}/profile",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{userA_id}}", "profile"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Profile - No Token (401 esperado)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('status is 401', () => pm.response.to.have.status(401));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{userA_id}}/profile",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{userA_id}}", "profile"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Profile - B intenta ver a A (403 esperado)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('status is 403', () => pm.response.to.have.status(403));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{userB_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{userA_id}}/profile",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{userA_id}}", "profile"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Replace Profile - Owner (A)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('telefono updated', () => pm.expect(body.telefono).to.eql('+56911112222'));",
+                  "pm.test('biografia updated', () => pm.expect(body.biografia).to.eql('Juego tenis los fines de semana'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{userA_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"nombre\": \"Ana\",\n  \"apellido_paterno\": \"Torres\",\n  \"apellido_materno\": \"Diaz\",\n  \"telefono\": \"+56911112222\",\n  \"biografia\": \"Juego tenis los fines de semana\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{userA_id}}/profile",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{userA_id}}", "profile"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Profile - Verifica update persistido",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('telefono persistido en Postgres', () => pm.expect(pm.response.json().telefono).to.eql('+56911112222'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{userA_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{userA_id}}/profile",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{userA_id}}", "profile"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "03 - Roles",
+      "item": [
+        {
+          "name": "Get Roles - Owner (A)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('role is player', () => pm.expect(pm.response.json().role).to.eql('player'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{userA_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{userA_id}}/roles",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{userA_id}}", "roles"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "04 - Preferences",
+      "item": [
+        {
+          "name": "Get Preferences - Default (A)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('deportes empty by default', () => pm.expect(pm.response.json().deportes).to.eql([]));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{userA_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{userA_id}}/preferences",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{userA_id}}", "preferences"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Replace Preferences (A)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('deporte guardado', () => pm.expect(body.deportes[0].deporte_codigo).to.eql('tennis'));",
+                  "pm.test('disponibilidad guardada', () => pm.expect(body.disponibilidad).to.have.lengthOf(1));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{userA_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deportes\": [{\"deporte_codigo\": \"tennis\", \"nivel\": 3}],\n  \"disponibilidad\": [{\"dia_semana\": \"lunes\", \"hora_inicio\": \"18:00\", \"hora_fin\": \"20:00\"}],\n  \"rango_distancia_km\": \"15\",\n  \"disponibilidad_match\": true\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{userA_id}}/preferences",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{userA_id}}", "preferences"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Preferences - Verifica update persistido",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('nivel persistido en Postgres', () => pm.expect(pm.response.json().deportes[0].nivel).to.eql(3));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{userA_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{userA_id}}/preferences",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{userA_id}}", "preferences"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "05 - Consents",
+      "item": [
+        {
+          "name": "Grant Consent (A)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test('status active', () => pm.expect(body.status).to.eql('active'));",
+                  "pm.environment.set('consentA_id', body.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{userA_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"privacy\",\n  \"purpose\": \"process matching preferences\",\n  \"document_version\": \"2026-09\",\n  \"method\": \"web\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{userA_id}}/consents",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{userA_id}}", "consents"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List Consents (A)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('one active consent', () => pm.expect(pm.response.json()).to.have.lengthOf(1));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{userA_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{userA_id}}/consents",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{userA_id}}", "consents"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Revoke Consent (A)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('status revoked', () => pm.expect(pm.response.json().status).to.eql('revoked'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{userA_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{userA_id}}/consents/{{consentA_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{userA_id}}", "consents", "{{consentA_id}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Revoke Consent Inexistente (404 esperado)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('status is 404', () => pm.response.to.have.status(404));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{userA_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{userA_id}}/consents/{{$guid}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{userA_id}}", "consents", "{{$guid}}"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "06 - Data Export",
+      "item": [
+        {
+          "name": "Export Personal Data (A)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('incluye perfil actualizado', () => pm.expect(body.profile.biografia).to.eql('Juego tenis los fines de semana'));",
+                  "pm.test('incluye el consentimiento revocado', () => pm.expect(body.consents).to.have.lengthOf(1));",
+                  "pm.test('consentimiento aparece revocado', () => pm.expect(body.consents[0].status).to.eql('revoked'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{userA_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{userA_id}}/exports",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{userA_id}}", "exports"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "07 - Autorizacion admin",
+      "item": [
+        {
+          "name": "Admin ve el perfil de A (200 esperado)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('es el perfil de A', () => pm.expect(pm.response.json().user_id).to.eql(pm.environment.get('userA_id')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{admin_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{userA_id}}/profile",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{userA_id}}", "profile"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Admin consulta usuario inexistente (404 esperado)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('status is 404', () => pm.response.to.have.status(404));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{admin_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{$guid}}/profile",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{$guid}}", "profile"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "08 - Ciclo de vida de cuenta (User B)",
+      "item": [
+        {
+          "name": "Grant Consent (B)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('status is 201', () => pm.response.to.have.status(201));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{userB_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"privacy\",\n  \"purpose\": \"process matching preferences\",\n  \"document_version\": \"2026-09\",\n  \"method\": \"web\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{userB_id}}/consents",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{userB_id}}", "consents"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Account (B)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 204', () => pm.response.to.have.status(204));",
+                  "pm.test('body vacio', () => pm.expect(pm.response.text()).to.eql(''));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{userB_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{userB_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{userB_id}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Profile After Delete (B) (401 esperado)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401 (token ya no resuelve a un usuario)', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{userB_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{userB_id}}/profile",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{userB_id}}", "profile"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "09 - Contrato de rutas",
+      "item": [
+        {
+          "name": "Ruta fuera del prefijo /api/v1 (404 esperado)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/users/auth/register",
+              "host": ["{{base_url}}"],
+              "path": ["users", "auth", "register"]
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
