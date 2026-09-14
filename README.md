@@ -1,5 +1,9 @@
 # SportMatch users service
 
+Integrado con el gateway hermano `../sportmatch-backend`. La ejecución conjunta y sus pruebas están en [la guía de integración](../sportmatch-backend/README.md). El despliegue local utiliza `USERS_DATABASE_URL` y la base existente `sportmach_users`; no es necesario crear `users_db`.
+
+La eliminación de cuentas en PostgreSQL es lógica (`is_active=false`): conserva las referencias existentes y bloquea el acceso posterior.
+
 Microservicio de usuarios de SportMatch. Expone exclusivamente rutas bajo
 /api/v1/users y persiste en la base de datos PostgreSQL propia del servicio
 (ver [db/README.md](db/README.md)). Las pruebas automatizadas siguen usando
@@ -36,11 +40,11 @@ Se necesita Python 3.11 o posterior.
    base de datos primero). En PowerShell:
 
    $env:JWT_SECRET = "reemplaza-esto-por-un-secreto-largo-y-aleatorio"
-   $env:DATABASE_URL = "postgresql+psycopg://sportmatch_users:tu-password@localhost:5432/users_db"
+   $env:USERS_DATABASE_URL = "postgresql://sportmach_users:tu-password@localhost:5432/sportmach_users"
 
 4. Arrancar el servicio:
 
-   uvicorn app.main:app --reload
+   uvicorn app.main:app --env-file .env --port 8001 --reload
 
 5. Ejecutar pruebas (usan un repositorio mock, no requieren base de datos):
 
@@ -53,9 +57,10 @@ tokens, ubicaciones ni otros datos sensibles.
 
 El esquema del servicio está en [db/README.md](db/README.md). Solo contiene
 las tablas que pertenecen a users y usa UUID v4; no es una copia de la base
-monolítica de referencia. Ejecuta primero db/00_create_database.sql con una
-cuenta administradora y luego db/migrations/001_users_schema.sql conectado a
-la nueva base.
+monolítica de referencia. Para la base existente `sportmach_users`, la migración
+`db/migrations/002_sportmach_users_integration.sql` agrega las tablas que faltan y
+conserva los datos. `users_migrate` la ejecuta desde Compose. No ejecutes
+`db/00_create_database.sql` para esta integración.
 
 ## Contrato v1
 
@@ -71,5 +76,4 @@ Todas las rutas usan el prefijo /api/v1/users:
 - GET /{id}/exports
 - DELETE /{id}
 
-La documentación interactiva no se expone hasta que el equipo acuerde una ruta
-que no contradiga las convenciones de API.
+La documentación interactiva de la integración está en el gateway: `http://localhost:8000/docs`. El microservicio también expone `/api/v1/users/health/ready` para comprobar su conexión a PostgreSQL.

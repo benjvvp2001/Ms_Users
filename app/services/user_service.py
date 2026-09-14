@@ -254,7 +254,7 @@ class UserService:
         return ProfileRead(user_id=user.id, rut=user.rut, **user.profile.model_dump())
 
     def _issue_token(self, user: StoredUser) -> TokenResponse:
-        token, expires_in_seconds = create_access_token(user.id)
+        token, expires_in_seconds = create_access_token(user.id, user.role)
         return TokenResponse(
             access_token=token,
             expires_in_seconds=expires_in_seconds,

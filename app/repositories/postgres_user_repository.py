@@ -18,7 +18,7 @@ from app.schemas.user import (
 
 
 class PostgresUserRepository:
-    """PostgreSQL-backed repository for the users_db schema (rol, usuario,
+    """PostgreSQL-backed repository for the sportmach_users schema (rol, usuario,
     preferencia_usuario, disponibilidad, usuario_deporte, consent, audit_events).
     """
 
@@ -116,7 +116,7 @@ class PostgresUserRepository:
                            u.telefono, u.foto_perfil, u.biografia, r.nombre AS role
                     FROM usuario u
                     JOIN rol r ON r.id = u.rol_id
-                    WHERE u.id = %s
+                    WHERE u.id = %s AND u.is_active = TRUE
                     """,
                     (user_id,),
                 )
@@ -349,7 +349,13 @@ class PostgresUserRepository:
     def delete_user(self, user_id: UUID) -> bool:
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM usuario WHERE id = %s", (user_id,))
+                # Keep notifications, memberships and payments consistent. An
+                # inactive account cannot log in or use previously issued JWTs.
+                cur.execute(
+                    "UPDATE usuario SET is_active = FALSE, "
+                    "fecha_actualizacion = CURRENT_TIMESTAMP "
+                    "WHERE id = %s AND is_active = TRUE", (user_id,)
+                )
                 return cur.rowcount > 0
 
     def record_audit(
