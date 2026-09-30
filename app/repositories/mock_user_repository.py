@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from threading import RLock
 from uuid import UUID, uuid4
 
-from app.repositories.base import AuditEvent, StoredUser
+from app.repositories.base import (
+    AuditEvent,
+    EmailVerificationRecord,
+    NewEmailVerification,
+    PasswordResetRecord,
+    StoredUser,
+    SuggestionCandidate,
+)
 from app.schemas.user import ConsentCreate, ConsentRead, PreferencesReplace, ProfileReplace
 
 
@@ -14,6 +22,8 @@ class MockUserRepository:
     def __init__(self) -> None:
         self._users: dict[UUID, StoredUser] = {}
         self._audit_events: list[AuditEvent] = []
+        self._password_resets: dict[UUID, PasswordResetRecord] = {}
+        self._email_verifications: dict[UUID, EmailVerificationRecord] = {}
         self._lock = RLock()
 
     def create_user(
@@ -24,6 +34,7 @@ class MockUserRepository:
         rut: str | None,
         profile: ProfileReplace,
         preferences: PreferencesReplace,
+        email_verification: NewEmailVerification,
     ) -> StoredUser:
         normalized_email = email.casefold()
         with self._lock:
@@ -39,8 +50,16 @@ class MockUserRepository:
                 rut=rut,
                 profile=profile,
                 preferences=preferences,
+                email_verified=False,
             )
             self._users[user.id] = user
+            self._email_verifications[user.id] = EmailVerificationRecord(
+                user_id=user.id,
+                code_hash=email_verification.code_hash,
+                expires_at=email_verification.expires_at,
+                sent_at=datetime.now(timezone.utc),
+                attempts=0,
+            )
             return user
 
     def get_user(self, user_id: UUID) -> StoredUser | None:
@@ -118,6 +137,29 @@ class MockUserRepository:
         with self._lock:
             return self._users.pop(user_id, None) is not None
 
+    def list_suggestion_candidates(
+        self, *, exclude_user_id: UUID, limit: int
+    ) -> list[SuggestionCandidate]:
+        with self._lock:
+            # Dicts keep insertion order, so reversed() is newest first.
+            users = [
+                user
+                for user in reversed(self._users.values())
+                if user.id != exclude_user_id and user.email_verified and user.role == "player"
+            ]
+            return [
+                SuggestionCandidate(
+                    id=user.id,
+                    nombre=user.profile.nombre,
+                    apellido_paterno=user.profile.apellido_paterno,
+                    fecha_nacimiento=user.profile.fecha_nacimiento,
+                    foto_perfil=user.profile.foto_perfil,
+                    biografia=user.profile.biografia,
+                    deportes=list(user.preferences.deportes),
+                )
+                for user in users[:limit]
+            ]
+
     def record_audit(
         self,
         *,
@@ -136,3 +178,104 @@ class MockUserRepository:
                     result=result,
                 )
             )
+
+    def create_password_reset(
+        self, *, user_id: UUID, code_hash: str, expires_at: datetime
+    ) -> PasswordResetRecord:
+        with self._lock:
+            self._password_resets = {
+                key: reset
+                for key, reset in self._password_resets.items()
+                if reset.user_id != user_id
+            }
+            reset = PasswordResetRecord(
+                id=uuid4(),
+                user_id=user_id,
+                code_hash=code_hash,
+                expires_at=expires_at,
+                created_at=datetime.now(timezone.utc),
+                attempts=0,
+            )
+            self._password_resets[reset.id] = reset
+            return reset
+
+    def get_active_password_reset(self, user_id: UUID) -> PasswordResetRecord | None:
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            return next(
+                (
+                    reset
+                    for reset in self._password_resets.values()
+                    if reset.user_id == user_id and reset.expires_at > now
+                ),
+                None,
+            )
+
+    def register_password_reset_attempt(self, reset_id: UUID, max_attempts: int) -> bool:
+        with self._lock:
+            reset = self._password_resets.get(reset_id)
+            if (
+                reset is None
+                or reset.attempts >= max_attempts
+                or reset.expires_at <= datetime.now(timezone.utc)
+            ):
+                return False
+            self._password_resets[reset_id] = replace(reset, attempts=reset.attempts + 1)
+            return True
+
+    def complete_password_reset(
+        self, *, reset_id: UUID, user_id: UUID, password_hash: bytes
+    ) -> bool:
+        with self._lock:
+            reset = self._password_resets.pop(reset_id, None)
+            user = self._users.get(user_id)
+            if reset is None or user is None:
+                return False
+            user.password_hash = password_hash
+            return True
+
+    def get_pending_email_verification(self, user_id: UUID) -> EmailVerificationRecord | None:
+        with self._lock:
+            return self._email_verifications.get(user_id)
+
+    def restart_email_verification(
+        self, *, user_id: UUID, code_hash: str, expires_at: datetime
+    ) -> bool:
+        with self._lock:
+            if user_id not in self._email_verifications:
+                return False
+            self._email_verifications[user_id] = EmailVerificationRecord(
+                user_id=user_id,
+                code_hash=code_hash,
+                expires_at=expires_at,
+                sent_at=datetime.now(timezone.utc),
+                attempts=0,
+            )
+            return True
+
+    def register_email_verification_attempt(self, user_id: UUID, max_attempts: int) -> bool:
+        with self._lock:
+            pending = self._email_verifications.get(user_id)
+            if (
+                pending is None
+                or pending.attempts >= max_attempts
+                or pending.expires_at <= datetime.now(timezone.utc)
+            ):
+                return False
+            self._email_verifications[user_id] = replace(pending, attempts=pending.attempts + 1)
+            return True
+
+    def complete_email_verification(self, *, user_id: UUID, code_hash: str) -> bool:
+        with self._lock:
+            pending = self._email_verifications.get(user_id)
+            user = self._users.get(user_id)
+            if (
+                pending is None
+                or user is None
+                or pending.code_hash != code_hash
+                or pending.expires_at <= datetime.now(timezone.utc)
+            ):
+                return False
+            del self._email_verifications[user_id]
+            user.email_verified = True
+            return True

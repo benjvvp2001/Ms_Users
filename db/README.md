@@ -2,11 +2,11 @@
 
 ## Integración actual con sportmach
 
-La base activa es `sportmach_users` en PostgreSQL local:5432. La variable canónica es `USERS_DATABASE_URL` (`DATABASE_URL` se acepta como alias para instalaciones anteriores). La migración `002_sportmach_users_integration.sql` conserva el esquema existente y añade las tablas de esta API. No se crea una segunda base `users_db`.
+La base activa es `sportmach_users` en PostgreSQL local:5432. La variable canónica es `USERS_DATABASE_URL` (`DATABASE_URL` se acepta como alias para instalaciones anteriores). La migración `002_sportmach_users_integration.sql` conserva el esquema existente y añade las tablas de esta API. La migración `003_password_reset.sql` agrega `password_reset_token` (códigos de recuperación de contraseña, solo su hash). La migración `004_email_verification.sql` agrega `email_verificacion` (una fila por cuenta registrada desde entonces, con el hash del código y `verified_at`; las cuentas sin fila se consideran verificadas). Es una tabla aparte porque `usuario` pertenece a otro rol y la aplicación no puede agregarle columnas. `python -m app.database.migrate` aplica todas y es idempotente. La 002 solo altera lo que falta (tipo de `rut`, índices), porque `ALTER TABLE` y `CREATE INDEX` exigen ser dueño de la tabla y el rol de la aplicación normalmente no lo es; si algo falta y no hay permisos, emite un `WARNING` y continúa. No se crea una segunda base `users_db`.
 
 El rol existente de `rol.id` es integer y se conserva; el repositorio también funciona con los UUID del esquema original del compañero. Las tablas de preferencias de esta API son independientes de las de matching. Los planes, membresías y pagos existentes siguen en USERS y no se trasladan.
 
-Las instrucciones siguientes documentan el diseño original para una instalación nueva; para esta integración sigue [la guía del backend](../../sportmatch-backend/README.md).
+Las instrucciones siguientes documentan el diseño original para una instalación nueva; para esta integración sigue [la guía del gateway](../../Ms_gateway/README.md).
 
 Este esquema es el que efectivamente pertenece al microservicio de usuarios,
 acordado con el equipo a partir del modelo monolítico de referencia

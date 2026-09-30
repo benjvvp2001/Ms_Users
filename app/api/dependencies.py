@@ -5,6 +5,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.security import get_token_subject
 from app.repositories.base import StoredUser, UserRepository
+from app.services.email_sender import EmailSender, get_email_sender
 from app.services.user_service import UserService
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -14,10 +15,16 @@ def get_repository(request: Request) -> UserRepository:
     return request.app.state.repository
 
 
+def get_mailer(request: Request) -> EmailSender:
+    # Tests inject a fake sender through create_app(); otherwise use EMAIL_BACKEND.
+    return getattr(request.app.state, "email_sender", None) or get_email_sender()
+
+
 def get_user_service(
     repository: UserRepository = Depends(get_repository),
+    email_sender: EmailSender = Depends(get_mailer),
 ) -> UserService:
-    return UserService(repository)
+    return UserService(repository, email_sender)
 
 
 def get_current_user(

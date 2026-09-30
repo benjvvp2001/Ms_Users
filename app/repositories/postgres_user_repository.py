@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID, uuid4
 
 import psycopg
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
-from app.repositories.base import StoredUser
+from app.repositories.base import (
+    EmailVerificationRecord,
+    NewEmailVerification,
+    PasswordResetRecord,
+    StoredUser,
+    SuggestionCandidate,
+)
 from app.schemas.user import (
     AvailabilityWindow,
     ConsentCreate,
@@ -19,7 +26,8 @@ from app.schemas.user import (
 
 class PostgresUserRepository:
     """PostgreSQL-backed repository for the sportmach_users schema (rol, usuario,
-    preferencia_usuario, disponibilidad, usuario_deporte, consent, audit_events).
+    preferencia_usuario, disponibilidad, usuario_deporte, consent, audit_events,
+    password_reset_token, email_verificacion).
     """
 
     def __init__(self, pool: ConnectionPool) -> None:
@@ -36,6 +44,7 @@ class PostgresUserRepository:
         rut: str | None,
         profile: ProfileReplace,
         preferences: PreferencesReplace,
+        email_verification: NewEmailVerification,
     ) -> StoredUser:
         user_id = uuid4()
         normalized_email = email.casefold()
@@ -89,6 +98,13 @@ class PostgresUserRepository:
                     )
                     self._replace_deportes(cur, user_id, preferences.deportes)
                     self._replace_disponibilidad(cur, user_id, preferences.disponibilidad)
+                    cur.execute(
+                        """
+                        INSERT INTO email_verificacion (usuario_id, code_hash, expires_at)
+                        VALUES (%s, %s, %s)
+                        """,
+                        (user_id, email_verification.code_hash, email_verification.expires_at),
+                    )
         except psycopg.errors.UniqueViolation as error:
             constraint = getattr(error.diag, "constraint_name", "") or ""
             if "rut" in constraint:
@@ -104,6 +120,7 @@ class PostgresUserRepository:
             preferences=preferences,
             role="player",
             consents=[],
+            email_verified=False,
         )
 
     def get_user(self, user_id: UUID) -> StoredUser | None:
@@ -113,9 +130,13 @@ class PostgresUserRepository:
                     """
                     SELECT u.id, u.email, u.password, u.rut, u.nombre,
                            u.apellido_paterno, u.apellido_materno, u.fecha_nacimiento,
-                           u.telefono, u.foto_perfil, u.biografia, r.nombre AS role
+                           u.telefono, u.foto_perfil, u.biografia, r.nombre AS role,
+                           -- Accounts created before email verification have no row.
+                           (ev.usuario_id IS NULL OR ev.verified_at IS NOT NULL)
+                               AS email_verified
                     FROM usuario u
                     JOIN rol r ON r.id = u.rol_id
+                    LEFT JOIN email_verificacion ev ON ev.usuario_id = u.id
                     WHERE u.id = %s AND u.is_active = TRUE
                     """,
                     (user_id,),
@@ -199,6 +220,7 @@ class PostgresUserRepository:
             ),
             role=user_row["role"],
             consents=consents,
+            email_verified=user_row["email_verified"],
         )
 
     def get_user_by_email(self, email: str) -> StoredUser | None:
@@ -358,6 +380,50 @@ class PostgresUserRepository:
                 )
                 return cur.rowcount > 0
 
+    def list_suggestion_candidates(
+        self, *, exclude_user_id: UUID, limit: int
+    ) -> list[SuggestionCandidate]:
+        with self._pool.connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT u.id, u.nombre, u.apellido_paterno, u.fecha_nacimiento,
+                           u.foto_perfil, u.biografia
+                    FROM usuario u
+                    JOIN rol r ON r.id = u.rol_id
+                    LEFT JOIN email_verificacion ev ON ev.usuario_id = u.id
+                    WHERE u.is_active = TRUE AND u.id <> %s AND r.nombre = 'player'
+                      AND (ev.usuario_id IS NULL OR ev.verified_at IS NOT NULL)
+                    ORDER BY u.fecha_creacion DESC
+                    LIMIT %s
+                    """,
+                    (exclude_user_id, limit),
+                )
+                rows = cur.fetchall()
+                deportes: dict[UUID, list[UserSport]] = {row["id"]: [] for row in rows}
+                if deportes:
+                    cur.execute(
+                        "SELECT usuario_id, deporte_codigo, nivel FROM usuario_deporte "
+                        "WHERE usuario_id = ANY(%s)",
+                        (list(deportes),),
+                    )
+                    for sport in cur.fetchall():
+                        deportes[sport["usuario_id"]].append(
+                            UserSport(deporte_codigo=sport["deporte_codigo"], nivel=sport["nivel"])
+                        )
+        return [
+            SuggestionCandidate(
+                id=row["id"],
+                nombre=row["nombre"],
+                apellido_paterno=row["apellido_paterno"],
+                fecha_nacimiento=row["fecha_nacimiento"],
+                foto_perfil=row["foto_perfil"],
+                biografia=row["biografia"],
+                deportes=deportes[row["id"]],
+            )
+            for row in rows
+        ]
+
     def record_audit(
         self, *, user_id: UUID, action: str, resource: str, result: str
     ) -> None:
@@ -370,6 +436,144 @@ class PostgresUserRepository:
                     """,
                     (uuid4(), user_id, action, resource, result),
                 )
+
+    def create_password_reset(
+        self, *, user_id: UUID, code_hash: str, expires_at: datetime
+    ) -> PasswordResetRecord:
+        with self._pool.connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    "UPDATE password_reset_token SET used_at = CURRENT_TIMESTAMP "
+                    "WHERE usuario_id = %s AND used_at IS NULL",
+                    (user_id,),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO password_reset_token (id, usuario_id, code_hash, expires_at)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING id, usuario_id, code_hash, expires_at, created_at, attempts
+                    """,
+                    (uuid4(), user_id, code_hash, expires_at),
+                )
+                row = cur.fetchone()
+        return self._as_password_reset(row)
+
+    def get_active_password_reset(self, user_id: UUID) -> PasswordResetRecord | None:
+        with self._pool.connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT id, usuario_id, code_hash, expires_at, created_at, attempts
+                    FROM password_reset_token
+                    WHERE usuario_id = %s AND used_at IS NULL
+                      AND expires_at > CURRENT_TIMESTAMP
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (user_id,),
+                )
+                row = cur.fetchone()
+        return None if row is None else self._as_password_reset(row)
+
+    def register_password_reset_attempt(self, reset_id: UUID, max_attempts: int) -> bool:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE password_reset_token SET attempts = attempts + 1
+                    WHERE id = %s AND used_at IS NULL AND attempts < %s
+                      AND expires_at > CURRENT_TIMESTAMP
+                    """,
+                    (reset_id, max_attempts),
+                )
+                return cur.rowcount > 0
+
+    def complete_password_reset(
+        self, *, reset_id: UUID, user_id: UUID, password_hash: bytes
+    ) -> bool:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE password_reset_token SET used_at = CURRENT_TIMESTAMP
+                    WHERE id = %s AND usuario_id = %s AND used_at IS NULL
+                      AND expires_at > CURRENT_TIMESTAMP
+                    """,
+                    (reset_id, user_id),
+                )
+                if cur.rowcount == 0:
+                    return False
+                cur.execute(
+                    "UPDATE usuario SET password = %s, "
+                    "fecha_actualizacion = CURRENT_TIMESTAMP "
+                    "WHERE id = %s AND is_active = TRUE",
+                    (password_hash.decode("utf-8"), user_id),
+                )
+                return cur.rowcount > 0
+
+    def get_pending_email_verification(self, user_id: UUID) -> EmailVerificationRecord | None:
+        with self._pool.connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT usuario_id, code_hash, expires_at, sent_at, attempts
+                    FROM email_verificacion
+                    WHERE usuario_id = %s AND verified_at IS NULL
+                    """,
+                    (user_id,),
+                )
+                row = cur.fetchone()
+        if row is None:
+            return None
+        return EmailVerificationRecord(
+            user_id=row["usuario_id"],
+            code_hash=row["code_hash"],
+            expires_at=row["expires_at"],
+            sent_at=row["sent_at"],
+            attempts=row["attempts"],
+        )
+
+    def restart_email_verification(
+        self, *, user_id: UUID, code_hash: str, expires_at: datetime
+    ) -> bool:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE email_verificacion
+                    SET code_hash = %s, expires_at = %s, attempts = 0,
+                        sent_at = CURRENT_TIMESTAMP
+                    WHERE usuario_id = %s AND verified_at IS NULL
+                    """,
+                    (code_hash, expires_at, user_id),
+                )
+                return cur.rowcount > 0
+
+    def register_email_verification_attempt(self, user_id: UUID, max_attempts: int) -> bool:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE email_verificacion SET attempts = attempts + 1
+                    WHERE usuario_id = %s AND verified_at IS NULL AND attempts < %s
+                      AND expires_at > CURRENT_TIMESTAMP
+                    """,
+                    (user_id, max_attempts),
+                )
+                return cur.rowcount > 0
+
+    def complete_email_verification(self, *, user_id: UUID, code_hash: str) -> bool:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE email_verificacion SET verified_at = CURRENT_TIMESTAMP
+                    WHERE usuario_id = %s AND code_hash = %s AND verified_at IS NULL
+                      AND expires_at > CURRENT_TIMESTAMP
+                    """,
+                    (user_id, code_hash),
+                )
+                return cur.rowcount > 0
 
     def _get_user_or_raise(self, user_id: UUID) -> StoredUser:
         user = self.get_user(user_id)
@@ -402,3 +606,13 @@ class PostgresUserRepository:
                 """,
                 (uuid4(), user_id, window.dia_semana, window.hora_inicio, window.hora_fin),
             )
+
+    def _as_password_reset(self, row: dict) -> PasswordResetRecord:
+        return PasswordResetRecord(
+            id=row["id"],
+            user_id=row["usuario_id"],
+            code_hash=row["code_hash"],
+            expires_at=row["expires_at"],
+            created_at=row["created_at"],
+            attempts=row["attempts"],
+        )

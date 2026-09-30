@@ -14,8 +14,10 @@ def main() -> None:
         existing = conn.execute("SELECT to_regclass('public.usuario')").fetchone()[0]
         migrations = [] if existing else ["001_users_schema.sql"]
         migrations.append("002_sportmach_users_integration.sql")
+        migrations.append("003_password_reset.sql")
+        migrations.append("004_email_verification.sql")
         for name in migrations:
-            conn.execute((directory / name).read_text())
+            conn.execute((directory / name).read_text(encoding="utf-8"))
             print(f"Applied {name}")
 
 

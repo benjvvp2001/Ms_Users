@@ -19,12 +19,15 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.repositories.mock_user_repository import MockUserRepository
+from fakes import FakeEmailSender, register_and_verify
 
-VALID_PASSWORD = "a-secure-test-password"
+VALID_PASSWORD = "A-secure-test-password-1"
 
 
 def make_client() -> TestClient:
-    return TestClient(create_app(repository=MockUserRepository()))
+    return TestClient(
+        create_app(repository=MockUserRepository(), email_sender=FakeEmailSender())
+    )
 
 
 def register_payload(**overrides: object) -> dict:
@@ -134,30 +137,40 @@ def test_registro_con_json_malformado_es_rechazado() -> None:
 #    (no deben romper el servicio ni ejecutarse) o ser rechazados por longitud
 # ---------------------------------------------------------------------------
 
-def test_registro_con_sql_injection_en_nombre_no_compromete_el_servicio() -> None:
+def _update_nombre(nombre: str) -> tuple[int, dict]:
     client = make_client()
-    payload = register_payload(
-        email="sqltest@example.com",
-        nombre="Robert'); DROP TABLE users;--",
+    registered = register_and_verify(client, register_payload())
+    user_id = registered["user"]["user_id"]
+    headers = auth_headers(registered["access_token"])
+    response = client.put(
+        f"/api/v1/users/{user_id}/profile",
+        headers=headers,
+        json={"nombre": nombre, "apellido_paterno": "Torres"},
     )
-    response = client.post("/api/v1/users/auth/register", json=payload)
-    # Debe aceptarse como texto literal (Pydantic/ORM parametrizado) y
-    # devolverse tal cual, sin causar error 500 ni alterar otros registros.
-    assert response.status_code == 201
-    assert response.json()["user"]["nombre"] == "Robert'); DROP TABLE users;--"
+    return response.status_code, response.json()
 
 
-def test_registro_con_xss_en_nombre_se_almacena_como_texto_literal() -> None:
+@pytest.mark.parametrize("nombre", ["Robert'); DROP TABLE users;--", "<script>alert(1)</script>"])
+def test_registro_rechaza_nombres_con_inyeccion(nombre: str) -> None:
     client = make_client()
-    payload = register_payload(
-        email="xsstest@example.com",
-        nombre="<script>alert(1)</script>",
-    )
-    response = client.post("/api/v1/users/auth/register", json=payload)
-    assert response.status_code == 201
-    # La API debe devolver el string literal (sin ejecutar/alterar el
-    # payload); el escapado para HTML es responsabilidad del frontend.
-    assert response.json()["user"]["nombre"] == "<script>alert(1)</script>"
+    response = client.post("/api/v1/users/auth/register", json=register_payload(nombre=nombre))
+    assert response.status_code == 422
+
+
+def test_perfil_con_sql_injection_en_nombre_no_compromete_el_servicio() -> None:
+    # El perfil acepta texto libre: debe guardarse como texto literal (SQL
+    # parametrizado), sin causar error 500 ni alterar otros registros.
+    status, body = _update_nombre("Robert'); DROP TABLE users;--")
+    assert status == 200
+    assert body["nombre"] == "Robert'); DROP TABLE users;--"
+
+
+def test_perfil_con_xss_en_nombre_se_almacena_como_texto_literal() -> None:
+    # La API devuelve el string literal; el escapado para HTML es
+    # responsabilidad del frontend.
+    status, body = _update_nombre("<script>alert(1)</script>")
+    assert status == 200
+    assert body["nombre"] == "<script>alert(1)</script>"
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +179,7 @@ def test_registro_con_xss_en_nombre_se_almacena_como_texto_literal() -> None:
 
 def test_login_con_credenciales_correctas_es_aceptado() -> None:
     client = make_client()
-    client.post("/api/v1/users/auth/register", json=register_payload())
+    register_and_verify(client, register_payload())
     response = client.post(
         "/api/v1/users/auth/login",
         json={"email": "ana@example.com", "password": VALID_PASSWORD},
@@ -272,12 +285,8 @@ def test_acceso_con_token_alg_none_es_rechazado() -> None:
 
 def test_acceso_a_perfil_de_otro_usuario_es_rechazado_idor() -> None:
     client = make_client()
-    victim = client.post(
-        "/api/v1/users/auth/register", json=register_payload(email="victima@example.com")
-    ).json()
-    attacker = client.post(
-        "/api/v1/users/auth/register", json=register_payload(email="atacante@example.com")
-    ).json()
+    victim = register_and_verify(client, register_payload(email="victima@example.com"))
+    attacker = register_and_verify(client, register_payload(email="atacante@example.com"))
 
     response = client.get(
         f"/api/v1/users/{victim['user']['user_id']}/profile",
@@ -300,9 +309,7 @@ def test_id_de_usuario_malformado_en_la_url_es_rechazado() -> None:
 # ---------------------------------------------------------------------------
 
 def _registrar_y_loguear(client: TestClient) -> tuple[str, dict]:
-    registration = client.post(
-        "/api/v1/users/auth/register", json=register_payload()
-    ).json()
+    registration = register_and_verify(client, register_payload())
     return registration["user"]["user_id"], auth_headers(registration["access_token"])
 
 
@@ -363,3 +370,50 @@ def test_preferencias_con_datos_correctos_son_aceptadas() -> None:
         },
     )
     assert response.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Contrato común con el frontend (services/validators.ts)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "descripcion,overrides",
+    [
+        ("password sin mayuscula", {"password": "sin-mayuscula-123"}),
+        ("password sin minuscula", {"password": "SIN-MINUSCULA-123"}),
+        ("password sin numero", {"password": "Sin-Numero-Aqui"}),
+        ("password sin caracter especial", {"password": "SinEspecial1234"}),
+        ("password con espacios", {"password": "Con Espacios-123"}),
+        ("password excede 64", {"password": "Aa1-" + "x" * 61}),
+        ("nombre con numeros", {"nombre": "Ana2"}),
+        ("nombre de 1 letra", {"nombre": "A"}),
+        ("apellido con simbolos", {"apellido_paterno": "<script>"}),
+        ("rut con digito verificador incorrecto", {"rut": "12345678-9"}),
+        ("rut con formato invalido", {"rut": "abc"}),
+        ("email de mas de 100 caracteres", {"email": "a" * 95 + "@x.com"}),
+    ],
+)
+def test_registro_aplica_las_mismas_reglas_que_la_app(descripcion: str, overrides: dict) -> None:
+    client = make_client()
+    response = client.post("/api/v1/users/auth/register", json=register_payload(**overrides))
+    assert response.status_code == 422, descripcion
+
+
+def test_registro_acepta_nombres_con_tildes_y_normaliza_rut() -> None:
+    client = make_client()
+    body = register_and_verify(
+        client,
+        register_payload(
+            nombre="José María",
+            apellido_paterno="Núñez",
+            apellido_materno="",
+            rut="12.345.678-5",
+        ),
+    )
+    profile = client.get(
+        f"/api/v1/users/{body['user']['user_id']}/profile",
+        headers=auth_headers(body["access_token"]),
+    ).json()
+    assert profile["rut"] == "12345678-5"
+    assert profile["apellido_materno"] is None
+    assert profile["nombre"] == "José María"

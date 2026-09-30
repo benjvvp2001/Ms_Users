@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import secrets
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
@@ -19,6 +22,34 @@ def hash_password(password: str) -> bytes:
 
 def verify_password(password: str, password_hash: bytes) -> bool:
     return bcrypt.checkpw(password.encode("utf-8"), password_hash)
+
+
+def generate_one_time_code() -> str:
+    """Six random digits, easy to type on a phone."""
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def _hash_one_time_code(purpose: bytes, code: str) -> str:
+    """Keyed hash so a leaked table cannot be brute-forced offline. The purpose
+    prefix keeps a password-reset code from validating an email and vice versa."""
+    key = get_settings().jwt_secret.encode("utf-8")
+    return hmac.new(key, purpose + b":" + code.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def hash_password_reset_code(code: str) -> str:
+    return _hash_one_time_code(b"password-reset", code)
+
+
+def verify_password_reset_code(code: str, code_hash: str) -> bool:
+    return hmac.compare_digest(hash_password_reset_code(code), code_hash)
+
+
+def hash_email_verification_code(code: str) -> str:
+    return _hash_one_time_code(b"email-verification", code)
+
+
+def verify_email_verification_code(code: str, code_hash: str) -> bool:
+    return hmac.compare_digest(hash_email_verification_code(code), code_hash)
 
 
 def create_access_token(user_id: UUID, role: str = "player") -> tuple[str, int]:

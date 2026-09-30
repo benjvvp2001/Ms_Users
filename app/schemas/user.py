@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from typing import Literal
 from uuid import UUID
@@ -9,22 +10,129 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, mo
 WEEKDAYS = {"lunes", "martes", "miercoles", "jueves", "viernes", "sabado", "domingo"}
 
 
+# Shared account rules. They mirror Frontend-SportMatch-APP/services/validators.ts;
+# change both places together (see the general README).
+EMAIL_MAX_LENGTH = 100
+PASSWORD_MIN_LENGTH = 12
+PASSWORD_MAX_LENGTH = 64
+NAME_MIN_LENGTH = 2
+NAME_MAX_LENGTH = 50
+_LETTERS = "A-Za-zÁÉÍÓÚÜÑáéíóúüñ"
+NAME_PATTERN = rf"^[{_LETTERS}]+(?:[ '-][{_LETTERS}]+)*$"
+RUT_PATTERN = re.compile(r"^\d{7,8}-[\dK]$")
+
+
+def check_email_length(email: str) -> str:
+    if len(email) > EMAIL_MAX_LENGTH:
+        raise ValueError(f"El correo no puede superar {EMAIL_MAX_LENGTH} caracteres.")
+    return email
+
+
+def check_password_policy(password: str) -> str:
+    """Same rules the app shows under the password field."""
+    problems = [
+        (re.search(r"[A-ZÁÉÍÓÚÑ]", password) is None, "una letra mayúscula"),
+        (re.search(r"[a-záéíóúñ]", password) is None, "una letra minúscula"),
+        (re.search(r"\d", password) is None, "un número"),
+        (re.search(r"[^A-Za-z0-9ÁÉÍÓÚÑáéíóúñ\s]", password) is None, "un carácter especial"),
+    ]
+    missing = [rule for failed, rule in problems if failed]
+    if missing:
+        raise ValueError("La contraseña debe incluir " + ", ".join(missing) + ".")
+    if re.search(r"\s", password):
+        raise ValueError("La contraseña no puede contener espacios.")
+    return password
+
+
+def normalize_rut(rut: str | None) -> str | None:
+    """Accept 12.345.678-5 or 12345678-5 and store 12345678-5 (DV checked)."""
+    if rut is None or not rut.strip():
+        return None
+    value = rut.replace(".", "").replace(" ", "").upper()
+    if not RUT_PATTERN.fullmatch(value):
+        raise ValueError("RUT con formato inválido. Usa 12345678-9.")
+    body, dv = value.split("-")
+    total, factor = 0, 2
+    for digit in reversed(body):
+        total += int(digit) * factor
+        factor = 2 if factor == 7 else factor + 1
+    expected = 11 - total % 11
+    expected_dv = "0" if expected == 11 else "K" if expected == 10 else str(expected)
+    if dv != expected_dv:
+        raise ValueError("El RUT no es válido (dígito verificador incorrecto).")
+    return value
+
+
 class APIModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
 class RegisterRequest(APIModel):
     email: EmailStr
-    password: str = Field(min_length=12, max_length=128)
-    nombre: str = Field(min_length=1, max_length=50)
-    apellido_paterno: str = Field(min_length=1, max_length=50)
-    apellido_materno: str | None = Field(default=None, max_length=50)
+    password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
+    nombre: str = Field(
+        min_length=NAME_MIN_LENGTH, max_length=NAME_MAX_LENGTH, pattern=NAME_PATTERN
+    )
+    apellido_paterno: str = Field(
+        min_length=NAME_MIN_LENGTH, max_length=NAME_MAX_LENGTH, pattern=NAME_PATTERN
+    )
+    apellido_materno: str | None = Field(
+        default=None, min_length=NAME_MIN_LENGTH, max_length=NAME_MAX_LENGTH, pattern=NAME_PATTERN
+    )
     rut: str | None = Field(default=None, max_length=20)
+
+    @field_validator("email")
+    @classmethod
+    def email_length(cls, value: str) -> str:
+        return check_email_length(value)
+
+    @field_validator("password")
+    @classmethod
+    def password_policy(cls, value: str) -> str:
+        return check_password_policy(value)
+
+    @field_validator("apellido_materno", mode="before")
+    @classmethod
+    def empty_apellido_materno_is_none(cls, value: object) -> object:
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("rut")
+    @classmethod
+    def rut_valido(cls, value: str | None) -> str | None:
+        return normalize_rut(value)
 
 
 class LoginRequest(APIModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=128)
+
+
+class PasswordResetRequest(APIModel):
+    email: EmailStr
+
+
+class PasswordResetConfirm(APIModel):
+    email: EmailStr
+    code: str = Field(pattern=r"^\d{6}$")
+    new_password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
+
+    @field_validator("new_password")
+    @classmethod
+    def password_policy(cls, value: str) -> str:
+        return check_password_policy(value)
+
+
+class EmailVerificationRequest(APIModel):
+    email: EmailStr
+
+
+class EmailVerificationConfirm(APIModel):
+    email: EmailStr
+    code: str = Field(pattern=r"^\d{6}$")
+
+
+class MessageResponse(APIModel):
+    detail: str
 
 
 class ProfileReplace(APIModel):
@@ -93,6 +201,20 @@ class PreferencesReplace(APIModel):
         return deportes
 
 
+class SuggestedUser(APIModel):
+    """Public card of another player. Only what the card shows: no email, rut,
+    phone, birth date or full last name."""
+
+    user_id: UUID
+    nombre: str
+    apellido_inicial: str
+    edad: int | None
+    foto_perfil: str | None
+    biografia: str | None
+    deportes: list[UserSport]
+    compatibilidad: int = Field(ge=0, le=100)
+
+
 class RoleRead(APIModel):
     role: str
 
@@ -118,6 +240,14 @@ class AuthenticatedUser(APIModel):
     nombre: str
     apellido_paterno: str
     role: str
+
+
+class RegisterResponse(APIModel):
+    """No token yet: the account stays inactive until the emailed code is confirmed."""
+
+    detail: str
+    email_verification_required: Literal[True] = True
+    user: AuthenticatedUser
 
 
 class TokenResponse(APIModel):

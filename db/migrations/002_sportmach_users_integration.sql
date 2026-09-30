@@ -4,9 +4,28 @@
 BEGIN;
 SELECT pg_advisory_xact_lock(hashtextextended('sportmatch-users-schema', 0));
 
+-- CREATE INDEX exige ser dueño de la tabla aunque el índice ya exista, por eso
+-- los índices se crean solo si faltan (to_regclass).
+
 -- El contrato del microservicio permite un RUT opcional de hasta 20 caracteres.
-ALTER TABLE usuario ALTER COLUMN rut TYPE VARCHAR(20);
-ALTER TABLE usuario ALTER COLUMN rut DROP NOT NULL;
+-- Solo se altera lo que falta: ALTER TABLE exige ser dueño de usuario, y en una
+-- base creada con 001 (o ya migrada) el rol de la aplicación no lo es.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'usuario' AND column_name = 'rut'
+          AND (data_type <> 'character varying' OR character_maximum_length IS DISTINCT FROM 20
+               OR is_nullable = 'NO')
+    ) THEN
+        BEGIN
+            ALTER TABLE usuario ALTER COLUMN rut TYPE VARCHAR(20);
+            ALTER TABLE usuario ALTER COLUMN rut DROP NOT NULL;
+        EXCEPTION WHEN insufficient_privilege THEN
+            RAISE WARNING 'usuario.rut debe ser VARCHAR(20) opcional: ejecuta esta migración como dueño de la tabla usuario';
+        END;
+    END IF;
+END $$;
 
 -- No se cambia el tipo ni los IDs de rol: funciona con integer o UUID.
 INSERT INTO rol (nombre, descripcion)
@@ -14,7 +33,16 @@ VALUES ('player', 'Deportista: rol por defecto del microservicio de usuarios')
 ON CONFLICT (nombre) DO NOTHING;
 
 -- El repositorio normaliza email a minúsculas; la base debe garantizar lo mismo.
-CREATE UNIQUE INDEX IF NOT EXISTS usuario_email_lower_unique ON usuario (lower(email));
+DO $$
+BEGIN
+    IF to_regclass('public.usuario_email_lower_unique') IS NULL THEN
+        BEGIN
+            CREATE UNIQUE INDEX usuario_email_lower_unique ON usuario (lower(email));
+        EXCEPTION WHEN insufficient_privilege THEN
+            RAISE WARNING 'Falta el índice usuario_email_lower_unique: créalo como dueño de la tabla usuario';
+        END;
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS preferencia_usuario (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -43,8 +71,13 @@ CREATE TABLE IF NOT EXISTS usuario_deporte (
     CONSTRAINT usuario_deporte_nivel_valido CHECK (nivel BETWEEN 1 AND 5)
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS usuario_deporte_usuario_codigo_unico
-    ON usuario_deporte (usuario_id, lower(deporte_codigo));
+DO $$
+BEGIN
+    IF to_regclass('public.usuario_deporte_usuario_codigo_unico') IS NULL THEN
+        CREATE UNIQUE INDEX usuario_deporte_usuario_codigo_unico
+            ON usuario_deporte (usuario_id, lower(deporte_codigo));
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS consent (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -70,7 +103,12 @@ CREATE TABLE IF NOT EXISTS audit_events (
     CONSTRAINT audit_events_result_no_vacio CHECK (btrim(result) <> '')
 );
 
-CREATE INDEX IF NOT EXISTS audit_events_actor_fecha_idx
-    ON audit_events (actor_user_id, fecha DESC);
+DO $$
+BEGIN
+    IF to_regclass('public.audit_events_actor_fecha_idx') IS NULL THEN
+        CREATE INDEX audit_events_actor_fecha_idx
+            ON audit_events (actor_user_id, fecha DESC);
+    END IF;
+END $$;
 
 COMMIT;

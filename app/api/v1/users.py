@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Response, status
 
 from app.api.dependencies import get_current_user, get_user_service
 from app.repositories.base import StoredUser
@@ -10,12 +10,19 @@ from app.schemas.user import (
     ConsentCreate,
     ConsentRead,
     DataExport,
+    EmailVerificationConfirm,
+    EmailVerificationRequest,
     LoginRequest,
+    MessageResponse,
+    PasswordResetConfirm,
+    PasswordResetRequest,
     PreferencesReplace,
     ProfileRead,
     ProfileReplace,
     RegisterRequest,
+    RegisterResponse,
     RoleRead,
+    SuggestedUser,
     TokenResponse,
 )
 from app.services.user_service import UserService
@@ -25,14 +32,36 @@ router = APIRouter(prefix="/api/v1/users", tags=["users"])
 
 @router.post(
     "/auth/register",
-    response_model=TokenResponse,
+    response_model=RegisterResponse,
     status_code=status.HTTP_201_CREATED,
 )
 def register(
     payload: RegisterRequest,
+    background_tasks: BackgroundTasks,
+    service: UserService = Depends(get_user_service),
+) -> RegisterResponse:
+    return service.register(payload, background_tasks)
+
+
+@router.post(
+    "/auth/email-verification/request",
+    response_model=MessageResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def request_email_verification(
+    payload: EmailVerificationRequest,
+    background_tasks: BackgroundTasks,
+    service: UserService = Depends(get_user_service),
+) -> MessageResponse:
+    return service.request_email_verification(payload, background_tasks)
+
+
+@router.post("/auth/email-verification/confirm", response_model=TokenResponse)
+def confirm_email_verification(
+    payload: EmailVerificationConfirm,
     service: UserService = Depends(get_user_service),
 ) -> TokenResponse:
-    return service.register(payload)
+    return service.confirm_email_verification(payload)
 
 
 @router.post("/auth/login", response_model=TokenResponse)
@@ -41,6 +70,36 @@ def login(
     service: UserService = Depends(get_user_service),
 ) -> TokenResponse:
     return service.login(payload)
+
+
+@router.post(
+    "/auth/password-reset/request",
+    response_model=MessageResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def request_password_reset(
+    payload: PasswordResetRequest,
+    background_tasks: BackgroundTasks,
+    service: UserService = Depends(get_user_service),
+) -> MessageResponse:
+    return service.request_password_reset(payload, background_tasks)
+
+
+@router.post("/auth/password-reset/confirm", response_model=MessageResponse)
+def confirm_password_reset(
+    payload: PasswordResetConfirm,
+    service: UserService = Depends(get_user_service),
+) -> MessageResponse:
+    return service.confirm_password_reset(payload)
+
+
+@router.get("/suggestions", response_model=list[SuggestedUser])
+def list_suggestions(
+    limit: int = Query(default=20, ge=1, le=50),
+    current_user: StoredUser = Depends(get_current_user),
+    service: UserService = Depends(get_user_service),
+) -> list[SuggestedUser]:
+    return service.list_suggestions(current_user, limit)
 
 
 @router.get("/{user_id}/profile", response_model=ProfileRead)

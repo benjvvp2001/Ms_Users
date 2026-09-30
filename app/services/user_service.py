@@ -1,25 +1,72 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
 
-from fastapi import HTTPException, status
+from fastapi import BackgroundTasks, HTTPException, status
 
-from app.core.security import create_access_token, hash_password, verify_password
-from app.repositories.base import StoredUser, UserRepository
+from app.core.config import get_email_settings
+from app.core.config import EmailSettings
+from app.core.security import (
+    create_access_token,
+    generate_one_time_code,
+    hash_email_verification_code,
+    hash_password,
+    hash_password_reset_code,
+    verify_email_verification_code,
+    verify_password,
+    verify_password_reset_code,
+)
+from app.repositories.base import (
+    NewEmailVerification,
+    StoredUser,
+    SuggestionCandidate,
+    UserRepository,
+)
 from app.schemas.user import (
     AuthenticatedUser,
     ConsentCreate,
     ConsentRead,
     DataExport,
+    EmailVerificationConfirm,
+    EmailVerificationRequest,
     LoginRequest,
+    MessageResponse,
+    PasswordResetConfirm,
+    PasswordResetRequest,
     PreferencesReplace,
     ProfileRead,
     ProfileReplace,
     RegisterRequest,
+    RegisterResponse,
     RoleRead,
+    SuggestedUser,
     TokenResponse,
+    UserSport,
 )
+from app.services.email_sender import (
+    EmailSender,
+    deliver_safely,
+    email_verification_message,
+    password_reset_message,
+)
+
+# Same answer whether or not the email exists, so the endpoint cannot be used
+# to discover which addresses are registered.
+PASSWORD_RESET_REQUESTED = (
+    "Si el correo está registrado, recibirás un código para restablecer tu contraseña."
+)
+INVALID_RESET_CODE = "invalid or expired reset code"
+REGISTERED_PENDING_VERIFICATION = (
+    "Cuenta creada. Te enviamos un código a tu correo para activarla."
+)
+EMAIL_VERIFICATION_REQUESTED = (
+    "Si la cuenta está pendiente de verificación, recibirás un nuevo código en tu correo."
+)
+INVALID_VERIFICATION_CODE = "invalid or expired verification code"
+EMAIL_NOT_VERIFIED = "email not verified"
+# Candidates read per request before ranking; enough for the current user base.
+SUGGESTION_CANDIDATES = 200
 
 
 class UserService:
@@ -31,12 +78,22 @@ class UserService:
     audit events, so routes stay thin HTTP adapters.
     """
 
-    def __init__(self, repository: UserRepository) -> None:
+    def __init__(
+        self, repository: UserRepository, email_sender: EmailSender | None = None
+    ) -> None:
         self._repository = repository
+        self._email_sender = email_sender
 
     # -- auth -----------------------------------------------------------
 
-    def register(self, payload: RegisterRequest) -> TokenResponse:
+    def register(
+        self, payload: RegisterRequest, background_tasks: BackgroundTasks
+    ) -> RegisterResponse:
+        """Create the account inactive and email it a code; it gets a token
+        only after confirm_email_verification."""
+        sender = self._require_email_sender()
+        settings = get_email_settings()
+        code = generate_one_time_code()
         try:
             user = self._repository.create_user(
                 email=str(payload.email),
@@ -60,6 +117,10 @@ class UserService:
                     mismo_nivel=None,
                     disponibilidad_match=True,
                 ),
+                email_verification=NewEmailVerification(
+                    code_hash=hash_email_verification_code(code),
+                    expires_at=self._verification_expiry(settings),
+                ),
             )
         except ValueError as error:
             raise HTTPException(
@@ -73,7 +134,11 @@ class UserService:
             resource="users",
             result="success",
         )
-        return self._issue_token(user)
+        self._send_verification_code(sender, user, code, settings, background_tasks)
+        return RegisterResponse(
+            detail=REGISTERED_PENDING_VERIFICATION,
+            user=self._as_authenticated_user(user),
+        )
 
     def login(self, payload: LoginRequest) -> TokenResponse:
         user = self._repository.get_user_by_email(str(payload.email))
@@ -82,6 +147,16 @@ class UserService:
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="invalid email or password",
             )
+        # Checked after the password, so it reveals nothing to someone who
+        # doesn't already know the credentials.
+        if not user.email_verified:
+            self._repository.record_audit(
+                user_id=user.id,
+                action="login",
+                resource="auth",
+                result="failure",
+            )
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=EMAIL_NOT_VERIFIED)
 
         self._repository.record_audit(
             user_id=user.id,
@@ -90,6 +165,154 @@ class UserService:
             result="success",
         )
         return self._issue_token(user)
+
+    # -- email verification -----------------------------------------------
+
+    def request_email_verification(
+        self, payload: EmailVerificationRequest, background_tasks: BackgroundTasks
+    ) -> MessageResponse:
+        """Send a fresh code to an unverified account. Same answer for unknown,
+        already verified or throttled addresses, so nothing is revealed."""
+        sender = self._require_email_sender()
+        settings = get_email_settings()
+        user = self._repository.get_user_by_email(str(payload.email))
+        pending = None if user is None else self._repository.get_pending_email_verification(user.id)
+        if user is None or pending is None:
+            return MessageResponse(detail=EMAIL_VERIFICATION_REQUESTED)
+
+        if datetime.now(timezone.utc) - pending.sent_at < timedelta(
+            seconds=settings.email_verification_resend_seconds
+        ):
+            return MessageResponse(detail=EMAIL_VERIFICATION_REQUESTED)
+
+        code = generate_one_time_code()
+        if not self._repository.restart_email_verification(
+            user_id=user.id,
+            code_hash=hash_email_verification_code(code),
+            expires_at=self._verification_expiry(settings),
+        ):
+            return MessageResponse(detail=EMAIL_VERIFICATION_REQUESTED)
+
+        self._repository.record_audit(
+            user_id=user.id,
+            action="request_email_verification",
+            resource="auth/email-verification",
+            result="success",
+        )
+        self._send_verification_code(sender, user, code, settings, background_tasks)
+        return MessageResponse(detail=EMAIL_VERIFICATION_REQUESTED)
+
+    def confirm_email_verification(self, payload: EmailVerificationConfirm) -> TokenResponse:
+        """Activate the account and log the user in with the same response as login."""
+        settings = get_email_settings()
+        user = self._repository.get_user_by_email(str(payload.email))
+        pending = None if user is None else self._repository.get_pending_email_verification(user.id)
+        if user is None or pending is None:
+            raise self._invalid_verification_code()
+
+        # Count the attempt before checking the code so parallel guesses
+        # cannot exceed the limit; expired codes fail here too.
+        if not self._repository.register_email_verification_attempt(
+            user.id, settings.email_verification_max_attempts
+        ) or not verify_email_verification_code(payload.code, pending.code_hash):
+            self._repository.record_audit(
+                user_id=user.id,
+                action="confirm_email_verification",
+                resource="auth/email-verification",
+                result="failure",
+            )
+            raise self._invalid_verification_code()
+
+        if not self._repository.complete_email_verification(
+            user_id=user.id, code_hash=pending.code_hash
+        ):
+            raise self._invalid_verification_code()
+
+        self._repository.record_audit(
+            user_id=user.id,
+            action="confirm_email_verification",
+            resource="auth/email-verification",
+            result="success",
+        )
+        return self._issue_token(user)
+
+    # -- password recovery ------------------------------------------------
+
+    def request_password_reset(
+        self, payload: PasswordResetRequest, background_tasks: BackgroundTasks
+    ) -> MessageResponse:
+        """Email a one-time code to the address the user typed, if it belongs
+        to an active account. The mail is sent after the response so neither
+        the answer nor its timing reveals whether the account exists."""
+        sender = self._require_email_sender()
+        settings = get_email_settings()
+        user = self._repository.get_user_by_email(str(payload.email))
+        if user is None:
+            return MessageResponse(detail=PASSWORD_RESET_REQUESTED)
+
+        now = datetime.now(timezone.utc)
+        latest = self._repository.get_active_password_reset(user.id)
+        if latest is not None and now - latest.created_at < timedelta(
+            seconds=settings.password_reset_resend_seconds
+        ):
+            # Throttle: the previous code is still fresh, don't flood the inbox.
+            return MessageResponse(detail=PASSWORD_RESET_REQUESTED)
+
+        code = generate_one_time_code()
+        self._repository.create_password_reset(
+            user_id=user.id,
+            code_hash=hash_password_reset_code(code),
+            expires_at=now + timedelta(minutes=settings.password_reset_code_minutes),
+        )
+        self._repository.record_audit(
+            user_id=user.id,
+            action="request_password_reset",
+            resource="auth/password-reset",
+            result="success",
+        )
+
+        subject, text, html = password_reset_message(
+            nombre=user.profile.nombre,
+            code=code,
+            minutes=settings.password_reset_code_minutes,
+        )
+        background_tasks.add_task(
+            deliver_safely, sender, to=user.email, subject=subject, text=text, html=html
+        )
+        return MessageResponse(detail=PASSWORD_RESET_REQUESTED)
+
+    def confirm_password_reset(self, payload: PasswordResetConfirm) -> MessageResponse:
+        settings = get_email_settings()
+        user = self._repository.get_user_by_email(str(payload.email))
+        reset = None if user is None else self._repository.get_active_password_reset(user.id)
+        if user is None or reset is None:
+            raise self._invalid_reset_code()
+
+        # Count the attempt before checking the code so parallel guesses
+        # cannot exceed the limit.
+        if not self._repository.register_password_reset_attempt(
+            reset.id, settings.password_reset_max_attempts
+        ) or not verify_password_reset_code(payload.code, reset.code_hash):
+            self._repository.record_audit(
+                user_id=user.id,
+                action="confirm_password_reset",
+                resource="auth/password-reset",
+                result="failure",
+            )
+            raise self._invalid_reset_code()
+
+        if not self._repository.complete_password_reset(
+            reset_id=reset.id, user_id=user.id, password_hash=hash_password(payload.new_password)
+        ):
+            raise self._invalid_reset_code()
+
+        self._repository.record_audit(
+            user_id=user.id,
+            action="confirm_password_reset",
+            resource="auth/password-reset",
+            result="success",
+        )
+        return MessageResponse(detail="Contraseña actualizada. Ya puedes iniciar sesión.")
 
     # -- profile ----------------------------------------------------------
 
@@ -119,6 +342,28 @@ class UserService:
             result="success",
         )
         return self._as_profile(user)
+
+    # -- suggestions ------------------------------------------------------
+
+    def list_suggestions(self, current_user: StoredUser, limit: int) -> list[SuggestedUser]:
+        """Other players for the discovery cards, never the caller, best
+        compatibility first (newest first on ties)."""
+        candidates = self._repository.list_suggestion_candidates(
+            exclude_user_id=current_user.id, limit=SUGGESTION_CANDIDATES
+        )
+        mine = current_user.preferences.deportes
+        ranked = sorted(
+            (self._as_suggestion(candidate, mine) for candidate in candidates),
+            key=lambda suggestion: suggestion.compatibilidad,
+            reverse=True,
+        )
+        self._repository.record_audit(
+            user_id=current_user.id,
+            action="list_suggestions",
+            resource="users/suggestions",
+            result="success",
+        )
+        return ranked[:limit]
 
     # -- roles --------------------------------------------------------------
 
@@ -235,6 +480,43 @@ class UserService:
             detail="not authorized to access this resource",
         )
 
+    def _invalid_reset_code(self) -> HTTPException:
+        return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=INVALID_RESET_CODE)
+
+    def _invalid_verification_code(self) -> HTTPException:
+        return HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=INVALID_VERIFICATION_CODE
+        )
+
+    def _require_email_sender(self) -> EmailSender:
+        if self._email_sender is None:
+            raise RuntimeError("an email sender is required to send verification codes")
+        return self._email_sender
+
+    def _verification_expiry(self, settings: EmailSettings) -> datetime:
+        return datetime.now(timezone.utc) + timedelta(
+            minutes=settings.email_verification_code_minutes
+        )
+
+    def _send_verification_code(
+        self,
+        sender: EmailSender,
+        user: StoredUser,
+        code: str,
+        settings: EmailSettings,
+        background_tasks: BackgroundTasks,
+    ) -> None:
+        # Sent after the response, like password recovery, so SMTP latency or
+        # failures never reach the client.
+        subject, text, html = email_verification_message(
+            nombre=user.profile.nombre,
+            code=code,
+            minutes=settings.email_verification_code_minutes,
+        )
+        background_tasks.add_task(
+            deliver_safely, sender, to=user.email, subject=subject, text=text, html=html
+        )
+
     def _get_user_or_404(self, user_id: UUID) -> StoredUser:
         user = self._repository.get_user(user_id)
         if user is None:
@@ -253,6 +535,20 @@ class UserService:
     def _as_profile(self, user: StoredUser) -> ProfileRead:
         return ProfileRead(user_id=user.id, rut=user.rut, **user.profile.model_dump())
 
+    def _as_suggestion(
+        self, candidate: SuggestionCandidate, mine: list[UserSport]
+    ) -> SuggestedUser:
+        return SuggestedUser(
+            user_id=candidate.id,
+            nombre=candidate.nombre,
+            apellido_inicial=f"{candidate.apellido_paterno[:1].upper()}.",
+            edad=_age(candidate.fecha_nacimiento),
+            foto_perfil=candidate.foto_perfil,
+            biografia=candidate.biografia,
+            deportes=candidate.deportes,
+            compatibilidad=_shared_sports_percent(mine, candidate.deportes),
+        )
+
     def _issue_token(self, user: StoredUser) -> TokenResponse:
         token, expires_in_seconds = create_access_token(user.id, user.role)
         return TokenResponse(
@@ -260,3 +556,22 @@ class UserService:
             expires_in_seconds=expires_in_seconds,
             user=self._as_authenticated_user(user),
         )
+
+
+def _age(birth_date: date | None) -> int | None:
+    if birth_date is None:
+        return None
+    today = date.today()
+    return today.year - birth_date.year - (
+        (today.month, today.day) < (birth_date.month, birth_date.day)
+    )
+
+
+def _shared_sports_percent(mine: list[UserSport], theirs: list[UserSport]) -> int:
+    """Sports in common over all the sports either of the two plays (0-100).
+    A placeholder until the matching service owns compatibility."""
+    my_codes = {sport.deporte_codigo for sport in mine}
+    their_codes = {sport.deporte_codigo for sport in theirs}
+    if not my_codes or not their_codes:
+        return 0
+    return round(100 * len(my_codes & their_codes) / len(my_codes | their_codes))

@@ -6,18 +6,22 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 
 from app.api.v1.users import router
-from app.core.config import get_database_url, get_settings
+from app.core.config import get_database_url, get_email_settings, get_settings
 from app.database.session import create_pool
 from app.repositories.base import UserRepository
 from app.repositories.postgres_user_repository import PostgresUserRepository
+from app.services.email_sender import EmailSender
 
 
-def create_app(repository: UserRepository | None = None) -> FastAPI:
+def create_app(
+    repository: UserRepository | None = None, email_sender: EmailSender | None = None
+) -> FastAPI:
     """Create the service without routes outside the approved users prefix.
 
     With no repository given, the PostgreSQL connection pool (configured via
     USERS_DATABASE_URL) is opened on server startup, not at import time. Tests
-    inject a MockUserRepository instead so they don't need a live database.
+    inject a MockUserRepository instead so they don't need a live database,
+    and a fake email_sender so password recovery never sends real mail.
     """
     owns_pool = repository is None
     pool_holder: dict[str, object] = {}
@@ -26,6 +30,7 @@ def create_app(repository: UserRepository | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if owns_pool:
             get_settings()
+            get_email_settings()
             pool = create_pool(get_database_url())
             pool_holder["pool"] = pool
             app.state.repository = PostgresUserRepository(pool)
@@ -45,6 +50,8 @@ def create_app(repository: UserRepository | None = None) -> FastAPI:
     )
     if repository is not None:
         app.state.repository = repository
+    if email_sender is not None:
+        app.state.email_sender = email_sender
     app.include_router(router)
 
     @app.get("/api/v1/users/health/ready", tags=["health"])

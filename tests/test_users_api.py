@@ -9,24 +9,25 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.repositories.mock_user_repository import MockUserRepository
+from fakes import FakeEmailSender, register_and_verify
 
 
 def make_client() -> TestClient:
-    return TestClient(create_app(repository=MockUserRepository()))
+    return TestClient(
+        create_app(repository=MockUserRepository(), email_sender=FakeEmailSender())
+    )
 
 
 def register(client: TestClient, email: str = "ana@example.com") -> dict:
-    response = client.post(
-        "/api/v1/users/auth/register",
-        json={
+    return register_and_verify(
+        client,
+        {
             "email": email,
-            "password": "a-secure-test-password",
+            "password": "A-secure-test-password-1",
             "nombre": "Ana",
             "apellido_paterno": "Torres",
         },
     )
-    assert response.status_code == 201
-    return response.json()
 
 
 def authorization_header(token: str) -> dict[str, str]:
