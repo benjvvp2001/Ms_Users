@@ -21,13 +21,14 @@ from app.schemas.user import (
     PreferencesReplace,
     ProfileReplace,
     UserSport,
+    Zona,
 )
 
 
 class PostgresUserRepository:
     """PostgreSQL-backed repository for the sportmach_users schema (rol, usuario,
     preferencia_usuario, disponibilidad, usuario_deporte, consent, audit_events,
-    password_reset_token, email_verificacion).
+    password_reset_token, email_verificacion, preferencia_perfil).
     """
 
     def __init__(self, pool: ConnectionPool) -> None:
@@ -98,6 +99,7 @@ class PostgresUserRepository:
                     )
                     self._replace_deportes(cur, user_id, preferences.deportes)
                     self._replace_disponibilidad(cur, user_id, preferences.disponibilidad)
+                    self._replace_objetivos_zona(cur, user_id, preferences)
                     cur.execute(
                         """
                         INSERT INTO email_verificacion (usuario_id, code_hash, expires_at)
@@ -185,6 +187,13 @@ class PostgresUserRepository:
                 ]
 
                 cur.execute(
+                    "SELECT objetivos, comuna, latitud, longitud FROM preferencia_perfil "
+                    "WHERE usuario_id = %s",
+                    (user_id,),
+                )
+                perfil_row = cur.fetchone()
+
+                cur.execute(
                     """
                     SELECT id, type, purpose, document_version, method,
                            granted_at, revoked_at, status
@@ -212,6 +221,8 @@ class PostgresUserRepository:
             preferences=PreferencesReplace(
                 deportes=deportes,
                 disponibilidad=disponibilidad,
+                objetivos=list(perfil_row["objetivos"]) if perfil_row else [],
+                zona=self._as_zona(perfil_row),
                 rango_distancia_km=preferences_row["rango_distancia_km"],
                 rango_edad_min=preferences_row["rango_edad_min"],
                 rango_edad_max=preferences_row["rango_edad_max"],
@@ -289,6 +300,7 @@ class PostgresUserRepository:
                 )
                 self._replace_deportes(cur, user_id, preferences.deportes)
                 self._replace_disponibilidad(cur, user_id, preferences.disponibilidad)
+                self._replace_objetivos_zona(cur, user_id, preferences)
         return self._get_user_or_raise(user_id)
 
     def add_consent(self, user_id: UUID, consent: ConsentCreate) -> ConsentRead:
@@ -606,6 +618,42 @@ class PostgresUserRepository:
                 """,
                 (uuid4(), user_id, window.dia_semana, window.hora_inicio, window.hora_fin),
             )
+
+    def _replace_objetivos_zona(
+        self, cur: psycopg.Cursor, user_id: UUID, preferences: PreferencesReplace
+    ) -> None:
+        zona = preferences.zona
+        if not preferences.objetivos and zona is None:
+            cur.execute("DELETE FROM preferencia_perfil WHERE usuario_id = %s", (user_id,))
+            return
+        cur.execute(
+            """
+            INSERT INTO preferencia_perfil (usuario_id, objetivos, comuna, latitud, longitud)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (usuario_id) DO UPDATE SET
+                objetivos = EXCLUDED.objetivos,
+                comuna = EXCLUDED.comuna,
+                latitud = EXCLUDED.latitud,
+                longitud = EXCLUDED.longitud,
+                fecha_actualizacion = CURRENT_TIMESTAMP
+            """,
+            (
+                user_id,
+                preferences.objetivos,
+                zona.comuna if zona else None,
+                zona.latitud if zona else None,
+                zona.longitud if zona else None,
+            ),
+        )
+
+    def _as_zona(self, row: dict | None) -> Zona | None:
+        if row is None or row["comuna"] is None:
+            return None
+        return Zona(
+            comuna=row["comuna"],
+            latitud=None if row["latitud"] is None else float(row["latitud"]),
+            longitud=None if row["longitud"] is None else float(row["longitud"]),
+        )
 
     def _as_password_reset(self, row: dict) -> PasswordResetRecord:
         return PasswordResetRecord(

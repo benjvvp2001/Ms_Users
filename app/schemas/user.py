@@ -20,6 +20,11 @@ NAME_MAX_LENGTH = 50
 _LETTERS = "A-Za-zÁÉÍÓÚÜÑáéíóúüñ"
 NAME_PATTERN = rf"^[{_LETTERS}]+(?:[ '-][{_LETTERS}]+)*$"
 RUT_PATTERN = re.compile(r"^\d{7,8}-[\dK]$")
+# Comunas like "Ñuñoa", "O'Higgins", "Pedro Aguirre Cerda" or "Til-Til".
+COMUNA_PATTERN = rf"^[{_LETTERS}.]+(?:[ '-][{_LETTERS}.]+)*$"
+OBJETIVOS_MAX = 5
+OBJETIVO_MIN_LENGTH = 2
+OBJETIVO_MAX_LENGTH = 50
 
 
 def check_email_length(email: str) -> str:
@@ -183,9 +188,32 @@ class AvailabilityWindow(APIModel):
         return self
 
 
+class Zona(APIModel):
+    """Where the user plays. The comuna is shown; coordinates stay private and
+    are only for computing distances later."""
+
+    comuna: str = Field(min_length=2, max_length=80, pattern=COMUNA_PATTERN)
+    latitud: float | None = Field(default=None, ge=-90, le=90)
+    longitud: float | None = Field(default=None, ge=-180, le=180)
+
+    @field_validator("comuna", mode="before")
+    @classmethod
+    def trim_comuna(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def coordenadas_completas(self) -> Zona:
+        if (self.latitud is None) != (self.longitud is None):
+            raise ValueError("latitud and longitud must be sent together")
+        return self
+
+
 class PreferencesReplace(APIModel):
     deportes: list[UserSport] = Field(default_factory=list, max_length=10)
     disponibilidad: list[AvailabilityWindow] = Field(default_factory=list, max_length=21)
+    # Free-text codes chosen in the app (e.g. "competir", "mejorar_condicion").
+    objetivos: list[str] = Field(default_factory=list, max_length=OBJETIVOS_MAX)
+    zona: Zona | None = None
     rango_distancia_km: str | None = Field(default=None, max_length=10)
     rango_edad_min: str | None = Field(default=None, max_length=5)
     rango_edad_max: str | None = Field(default=None, max_length=5)
@@ -199,6 +227,20 @@ class PreferencesReplace(APIModel):
         if len(normalized) != len(set(normalized)):
             raise ValueError("deportes must not contain duplicates")
         return deportes
+
+    @field_validator("objetivos")
+    @classmethod
+    def objetivos_validos(cls, objetivos: list[str]) -> list[str]:
+        limpios = [objetivo.strip() for objetivo in objetivos]
+        if any(
+            not OBJETIVO_MIN_LENGTH <= len(objetivo) <= OBJETIVO_MAX_LENGTH for objetivo in limpios
+        ):
+            raise ValueError(
+                f"each objetivo must have {OBJETIVO_MIN_LENGTH} to {OBJETIVO_MAX_LENGTH} characters"
+            )
+        if len({objetivo.casefold() for objetivo in limpios}) != len(limpios):
+            raise ValueError("objetivos must not contain duplicates")
+        return limpios
 
 
 class SuggestedUser(APIModel):

@@ -14,8 +14,8 @@ un repositorio mock en memoria para no depender de una base real.
 - Registro e inicio de sesión con JWT.
 - Recuperación de contraseña con un código de 6 dígitos enviado por correo
   (SMTP, cualquier proveedor).
-- Perfil, rol único y preferencias (incluye deportes declarados y
-  disponibilidad horaria).
+- Perfil, rol único y preferencias (deportes con nivel, disponibilidad
+  horaria, objetivos y zona/comuna).
 - Consentimientos versionados, exportación de datos y eliminación de cuenta.
 - Autorización en el servidor: el propietario del recurso o un administrador.
 - Auditoría persistida (tabla audit_events) para los accesos y cambios de
@@ -100,6 +100,32 @@ Todas las rutas usan el prefijo /api/v1/users:
 - DELETE /{id}/consents/{consent_id}
 - GET /{id}/exports
 - DELETE /{id}
+
+## Editar mi perfil deportivo
+
+`GET` y `PUT /{id}/preferences` (con JWT; solo el dueño o un admin). El `PUT`
+**reemplaza** todas las preferencias, así que la app debe enviar siempre las
+cinco secciones, aunque solo cambie una:
+
+```json
+{
+  "deportes": [{"deporte_codigo": "tennis", "nivel": 3}],
+  "disponibilidad": [{"dia_semana": "martes", "hora_inicio": "19:00", "hora_fin": "21:00"}],
+  "objetivos": ["competir", "socializar"],
+  "zona": {"comuna": "Ñuñoa", "latitud": -33.45694, "longitud": -70.5975}
+}
+```
+
+| Sección | Reglas (`422` si no se cumplen) |
+|---|---|
+| `deportes` | Máx. 10, sin repetir el código; `nivel` de 1 a 5. |
+| `disponibilidad` | Máx. 21 franjas; `dia_semana` de `lunes` a `domingo` (sin tildes); horas `HH:MM` y fin posterior al inicio. |
+| `objetivos` | Máx. 5 textos de 2 a 50 caracteres, sin repetir. Son códigos que define la app (p. ej. `competir`, `mejorar_condicion`). |
+| `zona` | `comuna` de 2 a 80 letras (se aceptan espacios, `'`, `-`, `.`). `latitud` y `longitud` son opcionales, pero van juntas. `null` borra la zona. |
+
+Los objetivos y la zona se guardan en `preferencia_perfil` (migración
+`005_profile_goals_zone.sql`). La zona y los objetivos **no** aparecen en las
+cards de otros usuarios; sí en la exportación de datos del propio usuario.
 
 ## Deportistas sugeridos
 
