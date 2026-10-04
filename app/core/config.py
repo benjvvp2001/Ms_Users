@@ -53,6 +53,8 @@ class EmailSettings:
     email_verification_code_minutes: int
     email_verification_max_attempts: int
     email_verification_resend_seconds: int
+    # Local development only: any 6-digit code activates the account.
+    accept_any_verification_code: bool = False
 
 
 def _positive_int(name: str, default: str) -> int:
@@ -82,6 +84,12 @@ def get_email_settings() -> EmailSettings:
     if backend not in {"smtp", "console"}:
         raise RuntimeError("EMAIL_BACKEND must be 'smtp' or 'console'")
 
+    accept_any_code = _flag("EMAIL_VERIFICATION_ACCEPT_ANY_CODE", "false")
+    if accept_any_code and backend != "console":
+        raise RuntimeError(
+            "EMAIL_VERIFICATION_ACCEPT_ANY_CODE is only allowed with EMAIL_BACKEND=console"
+        )
+
     smtp_username = os.getenv("SMTP_USERNAME") or None
     return EmailSettings(
         backend=backend,
@@ -100,6 +108,7 @@ def get_email_settings() -> EmailSettings:
         email_verification_resend_seconds=_positive_int(
             "EMAIL_VERIFICATION_RESEND_SECONDS", "60"
         ),
+        accept_any_verification_code=accept_any_code,
     )
 
 

@@ -13,6 +13,9 @@ from app.schemas.user import (
     UserSport,
 )
 
+# `usuario` is the athlete role in the original SportMatch database.
+ATHLETE_ROLES = ("player", "usuario")
+
 
 @dataclass
 class StoredUser:
@@ -110,7 +113,7 @@ class UserRepository(Protocol):
     def list_suggestion_candidates(
         self, *, exclude_user_id: UUID, limit: int
     ) -> list[SuggestionCandidate]:
-        """Newest active, verified players other than exclude_user_id."""
+        """Newest active, verified athletes other than exclude_user_id."""
         ...
 
     def record_audit(

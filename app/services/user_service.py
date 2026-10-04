@@ -18,6 +18,7 @@ from app.core.security import (
     verify_password_reset_code,
 )
 from app.repositories.base import (
+    ATHLETE_ROLES,
     NewEmailVerification,
     StoredUser,
     SuggestionCandidate,
@@ -214,7 +215,10 @@ class UserService:
         # cannot exceed the limit; expired codes fail here too.
         if not self._repository.register_email_verification_attempt(
             user.id, settings.email_verification_max_attempts
-        ) or not verify_email_verification_code(payload.code, pending.code_hash):
+        ) or not (
+            settings.accept_any_verification_code
+            or verify_email_verification_code(payload.code, pending.code_hash)
+        ):
             self._repository.record_audit(
                 user_id=user.id,
                 action="confirm_email_verification",
@@ -344,6 +348,24 @@ class UserService:
         return self._as_profile(user)
 
     # -- suggestions ------------------------------------------------------
+
+    def athlete_cards(self, current_user: StoredUser, user_ids: list[UUID]) -> list[SuggestedUser]:
+        """Public directory for matching, including profiles outside the suggestions window."""
+        if current_user.role not in ATHLETE_ROLES or not current_user.email_verified:
+            raise HTTPException(status_code=403, detail="Solo deportistas verificados pueden hacer match.")
+        cards = []
+        for user_id in dict.fromkeys(user_ids):
+            user = self._repository.get_user(user_id)
+            if user is None or user.role not in ATHLETE_ROLES or not user.email_verified:
+                continue
+            cards.append(self._as_suggestion(SuggestionCandidate(
+                id=user.id, nombre=user.profile.nombre,
+                apellido_paterno=user.profile.apellido_paterno,
+                fecha_nacimiento=user.profile.fecha_nacimiento,
+                foto_perfil=user.profile.foto_perfil, biografia=user.profile.biografia,
+                deportes=user.preferences.deportes,
+            ), current_user.preferences.deportes))
+        return cards
 
     def list_suggestions(self, current_user: StoredUser, limit: int) -> list[SuggestedUser]:
         """Other players for the discovery cards, never the caller, best

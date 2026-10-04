@@ -6,6 +6,7 @@ from threading import RLock
 from uuid import UUID, uuid4
 
 from app.repositories.base import (
+    ATHLETE_ROLES,
     AuditEvent,
     EmailVerificationRecord,
     NewEmailVerification,
@@ -145,7 +146,7 @@ class MockUserRepository:
             users = [
                 user
                 for user in reversed(self._users.values())
-                if user.id != exclude_user_id and user.email_verified and user.role == "player"
+                if user.id != exclude_user_id and user.email_verified and user.role in ATHLETE_ROLES
             ]
             return [
                 SuggestionCandidate(

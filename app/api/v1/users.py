@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from uuid import UUID
+from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query, Response, status
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, Response, status
 
 from app.api.dependencies import get_current_user, get_user_service
 from app.repositories.base import StoredUser
@@ -93,13 +94,40 @@ def confirm_password_reset(
     return service.confirm_password_reset(payload)
 
 
-@router.get("/suggestions", response_model=list[SuggestedUser])
+@router.get(
+    "/suggestions",
+    response_model=list[SuggestedUser],
+    summary="Listar otros deportistas registrados",
+    description="Cards públicas de deportistas activos y verificados (roles player y usuario). "
+    "Excluye la cuenta que consulta, administradores y representantes de clubes.",
+)
 def list_suggestions(
     limit: int = Query(default=20, ge=1, le=50),
     current_user: StoredUser = Depends(get_current_user),
     service: UserService = Depends(get_user_service),
 ) -> list[SuggestedUser]:
     return service.list_suggestions(current_user, limit)
+
+
+@router.get("/athletes/{user_id}", response_model=SuggestedUser)
+def athlete_card(
+    user_id: UUID,
+    current_user: StoredUser = Depends(get_current_user),
+    service: UserService = Depends(get_user_service),
+) -> SuggestedUser:
+    cards = service.athlete_cards(current_user, [user_id])
+    if not cards:
+        raise HTTPException(status_code=404, detail="Deportista no disponible.")
+    return cards[0]
+
+
+@router.post("/athletes/cards", response_model=list[SuggestedUser])
+def athlete_cards(
+    user_ids: Annotated[list[UUID], Body(max_length=100)],
+    current_user: StoredUser = Depends(get_current_user),
+    service: UserService = Depends(get_user_service),
+) -> list[SuggestedUser]:
+    return service.athlete_cards(current_user, user_ids)
 
 
 @router.get("/{user_id}/profile", response_model=ProfileRead)

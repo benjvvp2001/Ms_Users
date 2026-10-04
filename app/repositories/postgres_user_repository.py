@@ -8,6 +8,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 from app.repositories.base import (
+    ATHLETE_ROLES,
     EmailVerificationRecord,
     NewEmailVerification,
     PasswordResetRecord,
@@ -404,12 +405,12 @@ class PostgresUserRepository:
                     FROM usuario u
                     JOIN rol r ON r.id = u.rol_id
                     LEFT JOIN email_verificacion ev ON ev.usuario_id = u.id
-                    WHERE u.is_active = TRUE AND u.id <> %s AND r.nombre = 'player'
+                    WHERE u.is_active = TRUE AND u.id <> %s AND r.nombre = ANY(%s)
                       AND (ev.usuario_id IS NULL OR ev.verified_at IS NOT NULL)
                     ORDER BY u.fecha_creacion DESC
                     LIMIT %s
                     """,
-                    (exclude_user_id, limit),
+                    (exclude_user_id, list(ATHLETE_ROLES), limit),
                 )
                 rows = cur.fetchall()
                 deportes: dict[UUID, list[UserSport]] = {row["id"]: [] for row in rows}

@@ -129,8 +129,16 @@ cards de otros usuarios; sí en la exportación de datos del propio usuario.
 
 ## Deportistas sugeridos
 
+Matching consulta el directorio público autenticado mediante
+`GET /athletes/{user_id}` y `POST /athletes/cards` (lista de hasta 100 UUID).
+Solo deportistas activos y verificados pueden consultarlo, y solo se devuelven
+cards de otros deportistas activos y verificados, o la propia card para validar
+la cuenta. No expone datos de contacto ni coordenadas. Las solicitudes y el chat
+se implementan en `../Ms_Matching`, que no accede directamente a la base de Users.
+
 `GET /suggestions?limit=20` (requiere JWT; `limit` entre 1 y 50) devuelve las
-cards de la app: otros jugadores activos con el correo verificado, **nunca
+cards de la app: otros deportistas activos con el correo verificado (roles
+`player` y `usuario`, este último de la base original), **nunca
 quien consulta** ni cuentas `admin`/`club_admin`. Cada card expone solo datos
 públicos:
 
@@ -146,6 +154,13 @@ No incluye correo, RUT, teléfono, fecha de nacimiento ni apellidos completos.
 compatibilidad y, en empate, por registro más reciente. Se consideran los 200
 registros más recientes. Cuando exista el servicio de matching, la
 compatibilidad y la distancia deberían venir de ahí.
+
+La app consume este endpoint desde `cargarSugerencias()` tanto en la pantalla
+principal (hasta cinco cards recomendadas) como en Descubrir (hasta cincuenta).
+Una cuenta recién registrada aparece después de verificar el correo, incluso
+si todavía no declaró deportes. Los errores de conexión o sesión se muestran
+con una opción para reintentar o iniciar sesión; no se sustituyen por perfiles
+de ejemplo. Las solicitudes y matches requieren integrar el servicio de matching.
 
 ## Verificación de correo
 
