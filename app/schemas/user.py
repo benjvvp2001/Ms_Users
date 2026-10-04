@@ -243,6 +243,22 @@ class PreferencesReplace(APIModel):
         return limpios
 
 
+class SuggestionFilters(APIModel):
+    limit: int = Field(default=20, ge=1, le=50)
+    radius_km: float | None = Field(default=None, ge=1, le=100)
+    sport: str | None = Field(default=None, min_length=1, max_length=50)
+    min_level: int = Field(default=1, ge=1, le=5)
+    max_level: int = Field(default=5, ge=1, le=5)
+    shared_sports: bool = False
+    level_tolerance: int | None = Field(default=None, ge=0, le=4)
+
+    @model_validator(mode="after")
+    def valid_level_range(self) -> SuggestionFilters:
+        if self.min_level > self.max_level:
+            raise ValueError("El nivel mínimo no puede superar al máximo.")
+        return self
+
+
 class SuggestedUser(APIModel):
     """Public card of another player. Only what the card shows: no email, rut,
     phone, birth date or full last name."""
@@ -255,6 +271,8 @@ class SuggestedUser(APIModel):
     biografia: str | None
     deportes: list[UserSport]
     compatibilidad: int = Field(ge=0, le=100)
+    distancia_km: float | None = None
+    nivel_coincidente: bool = False
 
 
 class RoleRead(APIModel):

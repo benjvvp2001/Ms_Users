@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+from psycopg.types.json import Jsonb
 from datetime import datetime
 from uuid import UUID, uuid4
 
@@ -22,6 +24,7 @@ from app.schemas.user import (
     PreferencesReplace,
     ProfileReplace,
     UserSport,
+    SuggestionFilters,
     Zona,
 )
 
@@ -394,24 +397,20 @@ class PostgresUserRepository:
                 return cur.rowcount > 0
 
     def list_suggestion_candidates(
-        self, *, exclude_user_id: UUID, limit: int
+        self, *, exclude_user_id: UUID, limit: int, filters: SuggestionFilters,
+        origin: Zona | None, sports: list[UserSport]
     ) -> list[SuggestionCandidate]:
+        params = {
+            **filters.model_dump(), "user_id": exclude_user_id, "limit": limit,
+            "roles": list(ATHLETE_ROLES), "sports": Jsonb([s.model_dump() for s in sports]),
+            "latitude": origin.latitud if origin else None,
+            "longitude": origin.longitud if origin else None,
+            "filter_sport": filters.sport is not None or filters.shared_sports or filters.level_tolerance is not None
+                            or filters.min_level != 1 or filters.max_level != 5,
+        }
         with self._pool.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(
-                    """
-                    SELECT u.id, u.nombre, u.apellido_paterno, u.fecha_nacimiento,
-                           u.foto_perfil, u.biografia
-                    FROM usuario u
-                    JOIN rol r ON r.id = u.rol_id
-                    LEFT JOIN email_verificacion ev ON ev.usuario_id = u.id
-                    WHERE u.is_active = TRUE AND u.id <> %s AND r.nombre = ANY(%s)
-                      AND (ev.usuario_id IS NULL OR ev.verified_at IS NOT NULL)
-                    ORDER BY u.fecha_creacion DESC
-                    LIMIT %s
-                    """,
-                    (exclude_user_id, list(ATHLETE_ROLES), limit),
-                )
+                cur.execute((Path(__file__).parent / "sql/suggestions.sql").read_text(), params)
                 rows = cur.fetchall()
                 deportes: dict[UUID, list[UserSport]] = {row["id"]: [] for row in rows}
                 if deportes:
@@ -433,6 +432,8 @@ class PostgresUserRepository:
                 foto_perfil=row["foto_perfil"],
                 biografia=row["biografia"],
                 deportes=deportes[row["id"]],
+                distancia_km=row["distancia_km"],
+                nivel_coincidente=row["nivel_coincidente"],
             )
             for row in rows
         ]

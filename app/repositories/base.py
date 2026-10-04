@@ -11,6 +11,8 @@ from app.schemas.user import (
     PreferencesReplace,
     ProfileReplace,
     UserSport,
+    SuggestionFilters,
+    Zona,
 )
 
 # `usuario` is the athlete role in the original SportMatch database.
@@ -74,6 +76,8 @@ class SuggestionCandidate:
     foto_perfil: str | None
     biografia: str | None
     deportes: list[UserSport]
+    distancia_km: float | None = None
+    nivel_coincidente: bool = False
 
 
 class UserRepository(Protocol):
@@ -111,9 +115,10 @@ class UserRepository(Protocol):
     def delete_user(self, user_id: UUID) -> bool: ...
 
     def list_suggestion_candidates(
-        self, *, exclude_user_id: UUID, limit: int
+        self, *, exclude_user_id: UUID, limit: int, filters: SuggestionFilters,
+        origin: Zona | None, sports: list[UserSport]
     ) -> list[SuggestionCandidate]:
-        """Newest active, verified athletes other than exclude_user_id."""
+        """Filter and rank eligible athletes before applying the result limit."""
         ...
 
     def record_audit(

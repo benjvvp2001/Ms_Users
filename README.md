@@ -145,15 +145,45 @@ públicos:
 ```json
 {"user_id": "...", "nombre": "Diego", "apellido_inicial": "A.", "edad": 27,
  "foto_perfil": null, "biografia": "...",
- "deportes": [{"deporte_codigo": "tennis", "nivel": 3}], "compatibilidad": 50}
+ "deportes": [{"deporte_codigo": "tennis", "nivel": 3}], "compatibilidad": 50,
+ "distancia_km": 2.4, "nivel_coincidente": true}
 ```
 
-No incluye correo, RUT, teléfono, fecha de nacimiento ni apellidos completos.
-`compatibilidad` es provisoria: el porcentaje de deportes en común (compartidos
-÷ distintos entre los dos; 0 si alguno no declaró deportes). Se ordena por
-compatibilidad y, en empate, por registro más reciente. Se consideran los 200
-registros más recientes. Cuando exista el servicio de matching, la
-compatibilidad y la distancia deberían venir de ahí.
+No incluye correo, RUT, teléfono, fecha de nacimiento, apellidos completos ni coordenadas.
+Cada card añade `distancia_km` (aproximada, redondeada a una décima; `null` si falta
+ubicación) y `nivel_coincidente` (al menos un deporte compartido con diferencia de
+nivel de hasta 1). `compatibilidad` pondera cada deporte compartido por
+`1 - abs(nivel_propio - nivel_otro) / 4` y divide la suma por los deportes distintos
+entre ambos, expresada como porcentaje. Es una afinidad deportiva, no una probabilidad de match.
+
+Parámetros adicionales, combinables:
+
+| Parámetro | Comportamiento |
+|---|---|
+| `radius_km` | De 1 a 100 km; la app ofrece 5 y 10 km. Requiere coordenadas propias, excluye candidatos sin ubicación. Omitido = sin límite. |
+| `sport` | Código de deporte, por ejemplo `running` o `tennis`. |
+| `min_level`, `max_level` | Rango inclusivo de 1 a 5; mínimo no puede superar al máximo. |
+| `shared_sports` | Solo candidatos con un deporte en común. |
+| `level_tolerance` | Diferencia máxima de 0 a 4 respecto de tu nivel en ese mismo deporte. |
+
+Ejemplo: `/suggestions?radius_km=10&shared_sports=true&level_tolerance=1&limit=50`.
+Las condiciones de deporte, rango y diferencia de nivel deben cumplirse en la misma
+fila de deporte del candidato. Sin coordenadas propias, pedir un radio devuelve 422;
+la comuna escrita manualmente no se transforma en coordenadas inventadas.
+
+El repositorio PostgreSQL calcula distancia de gran círculo (Haversine) entre las
+coordenadas guardadas en `preferencia_perfil`. Filtra y ordena antes de aplicar
+`limit`, sin recortar previamente a los 200 usuarios más recientes. La prioridad es
+menor distancia, luego nivel similar, afinidad deportiva y registro reciente. Las
+distancias desconocidas quedan al final. Solo se recomiendan cuentas disponibles
+para matching (`disponibilidad_match`). Users conserva estos cálculos junto a los
+datos de perfil que posee; Matching sigue gestionando solicitudes, matches y chat.
+
+La app inicia con 10 km si hay ubicación y con deportes en común / tolerancia 1 si
+hay deportes propios; de lo contrario muestra opciones para completar el perfil.
+Los filtros se comparten entre Inicio y Descubrir durante la sesión. El GPS se
+solicita explícitamente mediante «Activar/Actualizar mi ubicación»; no hay seguimiento
+en segundo plano. En Perfil → Deportes se puede elegir el nivel de cada deporte.
 
 La app consume este endpoint desde `cargarSugerencias()` tanto en la pantalla
 principal (hasta cinco cards recomendadas) como en Descubrir (hasta cincuenta).

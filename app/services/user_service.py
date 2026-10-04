@@ -42,9 +42,11 @@ from app.schemas.user import (
     RegisterResponse,
     RoleRead,
     SuggestedUser,
+    SuggestionFilters,
     TokenResponse,
     UserSport,
 )
+from app.core.recommendations import compatibility, similar_level
 from app.services.email_sender import (
     EmailSender,
     deliver_safely,
@@ -66,8 +68,6 @@ EMAIL_VERIFICATION_REQUESTED = (
 )
 INVALID_VERIFICATION_CODE = "invalid or expired verification code"
 EMAIL_NOT_VERIFIED = "email not verified"
-# Candidates read per request before ranking; enough for the current user base.
-SUGGESTION_CANDIDATES = 200
 
 
 class UserService:
@@ -367,18 +367,16 @@ class UserService:
             ), current_user.preferences.deportes))
         return cards
 
-    def list_suggestions(self, current_user: StoredUser, limit: int) -> list[SuggestedUser]:
-        """Other players for the discovery cards, never the caller, best
-        compatibility first (newest first on ties)."""
+    def list_suggestions(self, current_user: StoredUser, limit: int, filters: SuggestionFilters | None = None) -> list[SuggestedUser]:
+        filters = filters or SuggestionFilters(limit=limit)
+        origin = current_user.preferences.zona
+        if filters.radius_km is not None and (origin is None or origin.latitud is None):
+            raise HTTPException(422, "Activa tu ubicación en el perfil para filtrar por distancia.")
         candidates = self._repository.list_suggestion_candidates(
-            exclude_user_id=current_user.id, limit=SUGGESTION_CANDIDATES
+            exclude_user_id=current_user.id, limit=limit, filters=filters,
+            origin=origin, sports=current_user.preferences.deportes,
         )
-        mine = current_user.preferences.deportes
-        ranked = sorted(
-            (self._as_suggestion(candidate, mine) for candidate in candidates),
-            key=lambda suggestion: suggestion.compatibilidad,
-            reverse=True,
-        )
+        ranked = [self._as_suggestion(candidate, current_user.preferences.deportes) for candidate in candidates]
         self._repository.record_audit(
             user_id=current_user.id,
             action="list_suggestions",
@@ -568,7 +566,9 @@ class UserService:
             foto_perfil=candidate.foto_perfil,
             biografia=candidate.biografia,
             deportes=candidate.deportes,
-            compatibilidad=_shared_sports_percent(mine, candidate.deportes),
+            compatibilidad=compatibility(mine, candidate.deportes),
+            distancia_km=None if candidate.distancia_km is None else round(candidate.distancia_km, 1),
+            nivel_coincidente=similar_level(mine, candidate.deportes),
         )
 
     def _issue_token(self, user: StoredUser) -> TokenResponse:
@@ -587,13 +587,3 @@ def _age(birth_date: date | None) -> int | None:
     return today.year - birth_date.year - (
         (today.month, today.day) < (birth_date.month, birth_date.day)
     )
-
-
-def _shared_sports_percent(mine: list[UserSport], theirs: list[UserSport]) -> int:
-    """Sports in common over all the sports either of the two plays (0-100).
-    A placeholder until the matching service owns compatibility."""
-    my_codes = {sport.deporte_codigo for sport in mine}
-    their_codes = {sport.deporte_codigo for sport in theirs}
-    if not my_codes or not their_codes:
-        return 0
-    return round(100 * len(my_codes & their_codes) / len(my_codes | their_codes))

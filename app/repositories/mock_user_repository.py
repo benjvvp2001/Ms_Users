@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from threading import RLock
 from uuid import UUID, uuid4
 
+from app.core.recommendations import compatibility, distance_km, matches_filters, similar_level
 from app.repositories.base import (
     ATHLETE_ROLES,
     AuditEvent,
@@ -139,7 +140,7 @@ class MockUserRepository:
             return self._users.pop(user_id, None) is not None
 
     def list_suggestion_candidates(
-        self, *, exclude_user_id: UUID, limit: int
+        self, *, exclude_user_id: UUID, limit: int, filters, origin, sports
     ) -> list[SuggestionCandidate]:
         with self._lock:
             # Dicts keep insertion order, so reversed() is newest first.
@@ -147,8 +148,9 @@ class MockUserRepository:
                 user
                 for user in reversed(self._users.values())
                 if user.id != exclude_user_id and user.email_verified and user.role in ATHLETE_ROLES
+                and user.preferences.disponibilidad_match
             ]
-            return [
+            candidates = [
                 SuggestionCandidate(
                     id=user.id,
                     nombre=user.profile.nombre,
@@ -157,9 +159,16 @@ class MockUserRepository:
                     foto_perfil=user.profile.foto_perfil,
                     biografia=user.profile.biografia,
                     deportes=list(user.preferences.deportes),
+                    distancia_km=distance_km(origin, user.preferences.zona),
+                    nivel_coincidente=similar_level(sports, user.preferences.deportes),
                 )
-                for user in users[:limit]
+                for user in users
             ]
+
+            candidates = [c for c in candidates if matches_filters(c.deportes, sports, c.distancia_km, filters)]
+            candidates.sort(key=lambda c: (c.distancia_km if c.distancia_km is not None else float('inf'),
+                                          not c.nivel_coincidente, -compatibility(sports, c.deportes)))
+            return candidates[:limit]
 
     def record_audit(
         self,

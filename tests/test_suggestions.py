@@ -151,6 +151,8 @@ def test_cards_expose_only_public_fields() -> None:
         "biografia",
         "deportes",
         "compatibilidad",
+        "distancia_km",
+        "nivel_coincidente",
     }
     assert "diego@example.com" not in str(card)
     assert "12345678" not in str(card)

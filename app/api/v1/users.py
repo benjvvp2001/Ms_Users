@@ -24,6 +24,7 @@ from app.schemas.user import (
     RegisterResponse,
     RoleRead,
     SuggestedUser,
+    SuggestionFilters,
     TokenResponse,
 )
 from app.services.user_service import UserService
@@ -102,11 +103,11 @@ def confirm_password_reset(
     "Excluye la cuenta que consulta, administradores y representantes de clubes.",
 )
 def list_suggestions(
-    limit: int = Query(default=20, ge=1, le=50),
+    filters: Annotated[SuggestionFilters, Query()],
     current_user: StoredUser = Depends(get_current_user),
     service: UserService = Depends(get_user_service),
 ) -> list[SuggestedUser]:
-    return service.list_suggestions(current_user, limit)
+    return service.list_suggestions(current_user, filters.limit, filters)
 
 
 @router.get("/athletes/{user_id}", response_model=SuggestedUser)
