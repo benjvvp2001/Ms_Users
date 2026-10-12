@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from uuid import UUID
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, Response, status
 
 from app.api.dependencies import get_current_user, get_user_service
 from app.repositories.base import StoredUser
 from app.schemas.user import (
+    BlockedUser,
     ConsentCreate,
     ConsentRead,
     DataExport,
@@ -22,6 +23,9 @@ from app.schemas.user import (
     ProfileReplace,
     RegisterRequest,
     RegisterResponse,
+    ReportCreate,
+    ReportRead,
+    ReportReview,
     RoleRead,
     SuggestedUser,
     SuggestionFilters,
@@ -129,6 +133,64 @@ def athlete_cards(
     service: UserService = Depends(get_user_service),
 ) -> list[SuggestedUser]:
     return service.athlete_cards(current_user, user_ids)
+
+
+@router.get("/me/blocks", response_model=list[BlockedUser])
+def list_blocked(
+    current_user: StoredUser = Depends(get_current_user),
+    service: UserService = Depends(get_user_service),
+) -> list[BlockedUser]:
+    return service.list_blocked(current_user)
+
+
+@router.put("/me/blocks/{user_id}", status_code=status.HTTP_204_NO_CONTENT,
+            summary="Bloquear: ambos dejan de verse en Descubrir")
+def block_user(
+    user_id: UUID,
+    current_user: StoredUser = Depends(get_current_user),
+    service: UserService = Depends(get_user_service),
+) -> Response:
+    service.block(current_user, user_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/me/blocks/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def unblock_user(
+    user_id: UUID,
+    current_user: StoredUser = Depends(get_current_user),
+    service: UserService = Depends(get_user_service),
+) -> Response:
+    service.unblock(current_user, user_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/reports", response_model=ReportRead, status_code=status.HTTP_201_CREATED)
+def create_report(
+    payload: ReportCreate,
+    current_user: StoredUser = Depends(get_current_user),
+    service: UserService = Depends(get_user_service),
+) -> ReportRead:
+    return service.report(current_user, payload)
+
+
+@router.get("/admin/reports", response_model=list[ReportRead], summary="Reportes para moderar (solo admin)")
+def list_reports(
+    estado: Literal["pendiente", "revisado", "descartado"] | None = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    current_user: StoredUser = Depends(get_current_user),
+    service: UserService = Depends(get_user_service),
+) -> list[ReportRead]:
+    return service.list_reports(current_user, estado, limit)
+
+
+@router.patch("/admin/reports/{report_id}", response_model=ReportRead)
+def review_report(
+    report_id: UUID,
+    payload: ReportReview,
+    current_user: StoredUser = Depends(get_current_user),
+    service: UserService = Depends(get_user_service),
+) -> ReportRead:
+    return service.review_report(current_user, report_id, payload.estado)
 
 
 @router.get("/{user_id}/profile", response_model=ProfileRead)

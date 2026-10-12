@@ -24,7 +24,8 @@ def directory():
         try:
             setup.execute(sql.SQL('SET search_path TO {}').format(sql.Identifier(schema)))
             migrations = Path(__file__).parents[1] / 'db/migrations'
-            for name in ('001_users_schema.sql', '004_email_verification.sql', '005_profile_goals_zone.sql'):
+            for name in ('001_users_schema.sql', '004_email_verification.sql', '005_profile_goals_zone.sql',
+                         '006_reports_blocks.sql'):
                 setup.execute((migrations / name).read_text())
             pool = ConnectionPool(dsn, kwargs={'options': f'-c search_path={schema}'}, min_size=1, max_size=2)
             pool.wait()
@@ -87,3 +88,27 @@ def test_real_sql_requires_all_sport_filters_on_the_same_row(directory):
             origin=None, sports=[UserSport(deporte_codigo='running', nivel=3)])
         assert [c.id for c in rows] == [valid]
         assert rows[0].distancia_km is None
+
+
+def test_real_sql_hides_blocked_people_both_ways_and_stores_reports(directory):
+    from app.schemas.user import ReportCreate
+    repo, pool, add = directory
+    me, blocked, other = add(None), add(None), add(None)
+    def search(user):
+        return {c.id for c in repo.list_suggestion_candidates(exclude_user_id=user, limit=50,
+            filters=SuggestionFilters(), origin=None, sports=[])}
+    repo.block_user(me, blocked)
+    repo.block_user(me, blocked)
+    assert search(me) == {other}
+    assert search(blocked) == {other}
+    assert [user for user, _ in repo.list_blocked(me)] == [blocked]
+    repo.unblock_user(me, blocked)
+    assert search(me) == {blocked, other}
+
+    body = ReportCreate(tipo='usuario', objetivo_id=str(blocked), objetivo_nombre='Prueba T.', motivo='Spam o publicidad')
+    created = repo.create_report(me, body)
+    assert created.estado == 'pendiente'
+    assert repo.create_report(me, body) is None
+    assert [r.id for r in repo.list_reports('pendiente', 10)] == [created.id]
+    assert repo.review_report(created.id, 'descartado', other).estado == 'descartado'
+    assert repo.list_reports('pendiente', 10) == []

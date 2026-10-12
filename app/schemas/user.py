@@ -279,6 +279,57 @@ class RoleRead(APIModel):
     role: str
 
 
+# Same lists the app shows (HU-42). The last one of each list requires an explanation.
+REPORT_REASONS: dict[str, tuple[str, ...]] = {
+    "usuario": ("Acoso o trato irrespetuoso", "Lenguaje ofensivo", "Perfil falso o suplantación",
+                "Spam o publicidad", "Otro"),
+    "actividad": ("Actividad falsa o engañosa", "Contenido inapropiado", "Lugar inseguro",
+                  "Spam o publicidad", "Otro"),
+    "mensaje": ("Acoso o amenazas", "Lenguaje ofensivo", "Contenido inapropiado", "Spam o estafa", "Otro"),
+}
+
+
+class PublicAthlete(APIModel):
+    """Minimal identity shown in block lists and to moderators."""
+
+    user_id: UUID
+    nombre: str
+    apellido_inicial: str
+    foto_perfil: str | None
+
+
+class BlockedUser(PublicAthlete):
+    fecha_bloqueo: datetime
+
+
+class ReportCreate(APIModel):
+    tipo: Literal["usuario", "actividad", "mensaje"]
+    objetivo_id: str = Field(min_length=1, max_length=120)
+    objetivo_nombre: str = Field(min_length=1, max_length=200)
+    motivo: str = Field(min_length=1, max_length=60)
+    detalle: str = Field(default="", max_length=300)
+
+    @model_validator(mode="after")
+    def valid_reason(self) -> "ReportCreate":
+        if self.motivo not in REPORT_REASONS[self.tipo]:
+            raise ValueError("Elige un motivo para el reporte.")
+        if self.motivo == "Otro" and len(self.detalle) < 10:
+            raise ValueError("Cuéntanos qué pasó (al menos 10 caracteres).")
+        return self
+
+
+class ReportRead(ReportCreate):
+    id: UUID
+    reportante: PublicAthlete | None
+    estado: Literal["pendiente", "revisado", "descartado"]
+    fecha_creacion: datetime
+    fecha_revision: datetime | None
+
+
+class ReportReview(APIModel):
+    estado: Literal["revisado", "descartado"]
+
+
 class ConsentCreate(APIModel):
     type: str = Field(min_length=1, max_length=50)
     purpose: str = Field(min_length=1, max_length=255)

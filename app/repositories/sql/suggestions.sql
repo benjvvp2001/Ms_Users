@@ -29,6 +29,10 @@ WITH mine AS (
     WHERE u.is_active=TRUE AND u.id<>%(user_id)s AND r.nombre=ANY(%(roles)s)
       AND (ev.usuario_id IS NULL OR ev.verified_at IS NOT NULL)
       AND COALESCE(pref.disponibilidad_match, TRUE)
+      -- A block hides both people from each other, whoever blocked whom.
+      AND NOT EXISTS (SELECT 1 FROM bloqueo_usuario b
+                      WHERE (b.bloqueador_id=%(user_id)s AND b.bloqueado_id=u.id)
+                         OR (b.bloqueador_id=u.id AND b.bloqueado_id=%(user_id)s))
       AND (NOT %(filter_sport)s OR EXISTS (
           SELECT 1 FROM usuario_deporte d
           LEFT JOIN mine m ON m.code=lower(d.deporte_codigo)

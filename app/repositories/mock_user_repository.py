@@ -12,10 +12,11 @@ from app.repositories.base import (
     EmailVerificationRecord,
     NewEmailVerification,
     PasswordResetRecord,
+    ReportRecord,
     StoredUser,
     SuggestionCandidate,
 )
-from app.schemas.user import ConsentCreate, ConsentRead, PreferencesReplace, ProfileReplace
+from app.schemas.user import ConsentCreate, ConsentRead, PreferencesReplace, ProfileReplace, ReportCreate
 
 
 class MockUserRepository:
@@ -26,6 +27,8 @@ class MockUserRepository:
         self._audit_events: list[AuditEvent] = []
         self._password_resets: dict[UUID, PasswordResetRecord] = {}
         self._email_verifications: dict[UUID, EmailVerificationRecord] = {}
+        self._blocks: dict[tuple[UUID, UUID], datetime] = {}
+        self._reports: dict[UUID, ReportRecord] = {}
         self._lock = RLock()
 
     def create_user(
@@ -149,6 +152,8 @@ class MockUserRepository:
                 for user in reversed(self._users.values())
                 if user.id != exclude_user_id and user.email_verified and user.role in ATHLETE_ROLES
                 and user.preferences.disponibilidad_match
+                and (exclude_user_id, user.id) not in self._blocks
+                and (user.id, exclude_user_id) not in self._blocks
             ]
             candidates = [
                 SuggestionCandidate(
@@ -289,3 +294,43 @@ class MockUserRepository:
             del self._email_verifications[user_id]
             user.email_verified = True
             return True
+
+    def block_user(self, blocker_id: UUID, blocked_id: UUID) -> None:
+        with self._lock:
+            self._blocks.setdefault((blocker_id, blocked_id), datetime.now(timezone.utc))
+
+    def unblock_user(self, blocker_id: UUID, blocked_id: UUID) -> None:
+        with self._lock:
+            self._blocks.pop((blocker_id, blocked_id), None)
+
+    def list_blocked(self, blocker_id: UUID) -> list[tuple[UUID, datetime]]:
+        with self._lock:
+            rows = [(blocked, at) for (blocker, blocked), at in self._blocks.items() if blocker == blocker_id]
+        return sorted(rows, key=lambda row: row[1], reverse=True)
+
+    def create_report(self, reporter_id: UUID, report: ReportCreate) -> ReportRecord | None:
+        with self._lock:
+            if any((r.reportante_id, r.tipo, r.objetivo_id, r.motivo)
+                   == (reporter_id, report.tipo, report.objetivo_id, report.motivo)
+                   for r in self._reports.values()):
+                return None
+            record = ReportRecord(
+                id=uuid4(), reportante_id=reporter_id, tipo=report.tipo, objetivo_id=report.objetivo_id,
+                objetivo_nombre=report.objetivo_nombre, motivo=report.motivo, detalle=report.detalle,
+                estado="pendiente", fecha_creacion=datetime.now(timezone.utc), fecha_revision=None,
+            )
+            self._reports[record.id] = record
+            return record
+
+    def list_reports(self, estado: str | None, limit: int) -> list[ReportRecord]:
+        with self._lock:
+            rows = [r for r in reversed(self._reports.values()) if estado is None or r.estado == estado]
+        return rows[:limit]
+
+    def review_report(self, report_id: UUID, estado: str, reviewer_id: UUID) -> ReportRecord | None:
+        with self._lock:
+            if report_id not in self._reports:
+                return None
+            record = replace(self._reports[report_id], estado=estado, fecha_revision=datetime.now(timezone.utc))
+            self._reports[report_id] = record
+            return record

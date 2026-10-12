@@ -14,6 +14,7 @@ from app.repositories.base import (
     EmailVerificationRecord,
     NewEmailVerification,
     PasswordResetRecord,
+    ReportRecord,
     StoredUser,
     SuggestionCandidate,
 )
@@ -23,6 +24,7 @@ from app.schemas.user import (
     ConsentRead,
     PreferencesReplace,
     ProfileReplace,
+    ReportCreate,
     UserSport,
     SuggestionFilters,
     Zona,
@@ -450,6 +452,73 @@ class PostgresUserRepository:
                     """,
                     (uuid4(), user_id, action, resource, result),
                 )
+
+    def block_user(self, blocker_id: UUID, blocked_id: UUID) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO bloqueo_usuario (bloqueador_id, bloqueado_id) VALUES (%s, %s) "
+                "ON CONFLICT DO NOTHING", (blocker_id, blocked_id),
+            )
+
+    def unblock_user(self, blocker_id: UUID, blocked_id: UUID) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM bloqueo_usuario WHERE bloqueador_id = %s AND bloqueado_id = %s",
+                (blocker_id, blocked_id),
+            )
+
+    def list_blocked(self, blocker_id: UUID) -> list[tuple[UUID, datetime]]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT bloqueado_id, fecha_creacion FROM bloqueo_usuario "
+                "WHERE bloqueador_id = %s ORDER BY fecha_creacion DESC", (blocker_id,),
+            ).fetchall()
+        return [(row[0], row[1]) for row in rows]
+
+    def create_report(self, reporter_id: UUID, report: ReportCreate) -> ReportRecord | None:
+        with self._pool.connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO reporte (id, reportante_id, tipo, objetivo_id, objetivo_nombre, motivo, detalle)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (reportante_id, tipo, objetivo_id, motivo) DO NOTHING
+                    RETURNING *
+                    """,
+                    (uuid4(), reporter_id, report.tipo, report.objetivo_id, report.objetivo_nombre,
+                     report.motivo, report.detalle),
+                )
+                row = cur.fetchone()
+        return None if row is None else self._as_report(row)
+
+    def list_reports(self, estado: str | None, limit: int) -> list[ReportRecord]:
+        with self._pool.connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    "SELECT * FROM reporte WHERE %(estado)s::text IS NULL OR estado = %(estado)s "
+                    "ORDER BY fecha_creacion DESC, id LIMIT %(limit)s",
+                    {"estado": estado, "limit": limit},
+                )
+                return [self._as_report(row) for row in cur.fetchall()]
+
+    def review_report(self, report_id: UUID, estado: str, reviewer_id: UUID) -> ReportRecord | None:
+        with self._pool.connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    "UPDATE reporte SET estado = %s, revisado_por = %s, fecha_revision = CURRENT_TIMESTAMP "
+                    "WHERE id = %s RETURNING *",
+                    (estado, reviewer_id, report_id),
+                )
+                row = cur.fetchone()
+        return None if row is None else self._as_report(row)
+
+    def _as_report(self, row: dict) -> ReportRecord:
+        return ReportRecord(
+            id=row["id"], reportante_id=row["reportante_id"], tipo=row["tipo"],
+            objetivo_id=row["objetivo_id"], objetivo_nombre=row["objetivo_nombre"],
+            motivo=row["motivo"], detalle=row["detalle"], estado=row["estado"],
+            fecha_creacion=row["fecha_creacion"], fecha_revision=row["fecha_revision"],
+        )
 
     def create_password_reset(
         self, *, user_id: UUID, code_hash: str, expires_at: datetime

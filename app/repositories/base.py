@@ -10,6 +10,7 @@ from app.schemas.user import (
     ConsentRead,
     PreferencesReplace,
     ProfileReplace,
+    ReportCreate,
     UserSport,
     SuggestionFilters,
     Zona,
@@ -78,6 +79,20 @@ class SuggestionCandidate:
     deportes: list[UserSport]
     distancia_km: float | None = None
     nivel_coincidente: bool = False
+
+
+@dataclass(frozen=True)
+class ReportRecord:
+    id: UUID
+    reportante_id: UUID | None
+    tipo: str
+    objetivo_id: str
+    objetivo_nombre: str
+    motivo: str
+    detalle: str
+    estado: str
+    fecha_creacion: datetime
+    fecha_revision: datetime | None
 
 
 class UserRepository(Protocol):
@@ -162,3 +177,23 @@ class UserRepository(Protocol):
     def complete_email_verification(self, *, user_id: UUID, code_hash: str) -> bool:
         """Mark the email as verified if that code is still the pending one."""
         ...
+
+    def block_user(self, blocker_id: UUID, blocked_id: UUID) -> None:
+        """Idempotent: blocking twice keeps the original date."""
+        ...
+
+    def unblock_user(self, blocker_id: UUID, blocked_id: UUID) -> None: ...
+
+    def list_blocked(self, blocker_id: UUID) -> list[tuple[UUID, datetime]]:
+        """(blocked user, blocked at), newest first."""
+        ...
+
+    def create_report(self, reporter_id: UUID, report: ReportCreate) -> ReportRecord | None:
+        """None when this person already sent the same reason about the same target."""
+        ...
+
+    def list_reports(self, estado: str | None, limit: int) -> list[ReportRecord]:
+        """Newest first; all states when estado is None."""
+        ...
+
+    def review_report(self, report_id: UUID, estado: str, reviewer_id: UUID) -> ReportRecord | None: ...

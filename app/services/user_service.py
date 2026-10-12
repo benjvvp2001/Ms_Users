@@ -20,12 +20,14 @@ from app.core.security import (
 from app.repositories.base import (
     ATHLETE_ROLES,
     NewEmailVerification,
+    ReportRecord,
     StoredUser,
     SuggestionCandidate,
     UserRepository,
 )
 from app.schemas.user import (
     AuthenticatedUser,
+    BlockedUser,
     ConsentCreate,
     ConsentRead,
     DataExport,
@@ -38,6 +40,9 @@ from app.schemas.user import (
     PreferencesReplace,
     ProfileRead,
     ProfileReplace,
+    PublicAthlete,
+    ReportCreate,
+    ReportRead,
     RegisterRequest,
     RegisterResponse,
     RoleRead,
@@ -384,6 +389,69 @@ class UserService:
             result="success",
         )
         return ranked[:limit]
+
+    # -- blocks and reports ---------------------------------------------------
+
+    def block(self, current_user: StoredUser, user_id: UUID) -> None:
+        """Hides both people from each other in Discover; matches, chats and activities stay."""
+        if user_id == current_user.id:
+            raise HTTPException(422, "No puedes bloquearte a ti mismo.")
+        self._get_user_or_404(user_id)
+        self._repository.block_user(current_user.id, user_id)
+        self._repository.record_audit(user_id=current_user.id, action="block_user",
+                                      resource=f"users/{user_id}", result="success")
+
+    def unblock(self, current_user: StoredUser, user_id: UUID) -> None:
+        self._repository.unblock_user(current_user.id, user_id)
+        self._repository.record_audit(user_id=current_user.id, action="unblock_user",
+                                      resource=f"users/{user_id}", result="success")
+
+    def list_blocked(self, current_user: StoredUser) -> list[BlockedUser]:
+        blocked = []
+        for user_id, blocked_at in self._repository.list_blocked(current_user.id):
+            user = self._repository.get_user(user_id)
+            if user is not None:
+                blocked.append(BlockedUser(**self._as_public(user).model_dump(), fecha_bloqueo=blocked_at))
+        return blocked
+
+    def report(self, current_user: StoredUser, payload: ReportCreate) -> ReportRead:
+        if payload.tipo == "usuario" and payload.objetivo_id == str(current_user.id):
+            raise HTTPException(422, "No puedes reportarte a ti mismo.")
+        record = self._repository.create_report(current_user.id, payload)
+        if record is None:
+            raise HTTPException(409, "Ya enviaste este reporte. Lo estamos revisando.")
+        return self._as_report(record)
+
+    def list_reports(self, current_user: StoredUser, estado: str | None, limit: int) -> list[ReportRead]:
+        self._require_admin(current_user)
+        return [self._as_report(record) for record in self._repository.list_reports(estado, limit)]
+
+    def review_report(self, current_user: StoredUser, report_id: UUID, estado: str) -> ReportRead:
+        self._require_admin(current_user)
+        record = self._repository.review_report(report_id, estado, current_user.id)
+        if record is None:
+            raise HTTPException(404, "Reporte no encontrado.")
+        self._repository.record_audit(user_id=current_user.id, action=f"report_{estado}",
+                                      resource=f"reports/{report_id}", result="success")
+        return self._as_report(record)
+
+    def _require_admin(self, current_user: StoredUser) -> None:
+        if current_user.role != "admin":
+            raise HTTPException(403, "Solo un administrador puede revisar reportes.")
+
+    def _as_public(self, user: StoredUser) -> PublicAthlete:
+        return PublicAthlete(user_id=user.id, nombre=user.profile.nombre,
+                             apellido_inicial=f"{user.profile.apellido_paterno[:1].upper()}.",
+                             foto_perfil=user.profile.foto_perfil)
+
+    def _as_report(self, record: ReportRecord) -> ReportRead:
+        reporter = None if record.reportante_id is None else self._repository.get_user(record.reportante_id)
+        return ReportRead(
+            id=record.id, tipo=record.tipo, objetivo_id=record.objetivo_id,
+            objetivo_nombre=record.objetivo_nombre, motivo=record.motivo, detalle=record.detalle,
+            reportante=None if reporter is None else self._as_public(reporter),
+            estado=record.estado, fecha_creacion=record.fecha_creacion, fecha_revision=record.fecha_revision,
+        )
 
     # -- roles --------------------------------------------------------------
 
