@@ -48,10 +48,12 @@ def test_a_block_hides_both_people_from_each_other_in_discover() -> None:
     blocked = client.get(f"{USERS}/me/blocks", headers=ana["headers"]).json()
     assert [(b["user_id"], b["nombre"], b["apellido_inicial"]) for b in blocked] == [(beto["id"], "Beto", "T.")]
     assert client.get(f"{USERS}/me/blocks", headers=beto["headers"]).json() == []
-    # The public card still works, so existing matches and activities keep showing the person.
-    assert client.get(f"{USERS}/athletes/{beto['id']}", headers=ana["headers"]).status_code == 200
+    # Since HU-51 a block also withholds the athlete card both ways (that is what stops requests and
+    # messages in Matching); the full behaviour is covered in test_blocks_mutes.py.
+    assert client.get(f"{USERS}/athletes/{beto['id']}", headers=ana["headers"]).status_code == 404
 
     assert client.delete(f"{USERS}/me/blocks/{beto['id']}", headers=ana["headers"]).status_code == 204
+    assert client.get(f"{USERS}/athletes/{beto['id']}", headers=ana["headers"]).status_code == 200
     assert suggested(client, ana) == {beto["id"], carla["id"]}
     assert suggested(client, beto) == {ana["id"], carla["id"]}
 

@@ -18,6 +18,8 @@ def main() -> None:
         migrations.append("004_email_verification.sql")
         migrations.append("005_profile_goals_zone.sql")
         migrations.append("006_reports_blocks.sql")
+        migrations.append("007_chat_mutes.sql")
+        migrations.append("008_current_location.sql")
         for name in migrations:
             conn.execute((directory / name).read_text(encoding="utf-8"))
             print(f"Applied {name}")

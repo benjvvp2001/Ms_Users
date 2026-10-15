@@ -6,6 +6,7 @@ from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
+from pydantic.alias_generators import to_camel
 
 WEEKDAYS = {"lunes", "martes", "miercoles", "jueves", "viernes", "sabado", "domingo"}
 
@@ -208,6 +209,24 @@ class Zona(APIModel):
         return self
 
 
+class LocationUpdate(APIModel):
+    """The current position, sent by the app after moving. Never returned to anyone."""
+
+    latitud: float = Field(ge=-90, le=90)
+    longitud: float = Field(ge=-180, le=180)
+    precision_m: int | None = Field(default=None, ge=0, le=100000)
+
+
+class LocationStatus(APIModel):
+    has_location: bool
+    # PUT only: False when the move was smaller than min_distance_meters and the position was kept.
+    updated: bool | None = None
+    updated_at: datetime | None = None
+    # So the app uses the same threshold as the service.
+    min_distance_meters: int
+    max_age_minutes: int
+
+
 class PreferencesReplace(APIModel):
     deportes: list[UserSport] = Field(default_factory=list, max_length=10)
     disponibilidad: list[AvailabilityWindow] = Field(default_factory=list, max_length=21)
@@ -300,6 +319,48 @@ class PublicAthlete(APIModel):
 
 class BlockedUser(PublicAthlete):
     fecha_bloqueo: datetime
+
+
+class CamelAPIModel(APIModel):
+    """Input that arrives in camelCase (the HU-51 contract); snake_case is accepted too."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, alias_generator=to_camel,
+                              populate_by_name=True)
+
+
+class BlockCreate(CamelAPIModel):
+    blocked_user_id: UUID
+
+
+class BlockCheck(APIModel):
+    """Only whether a block exists between the two people, never who blocked whom."""
+
+    blocked: bool
+
+
+class MutedUser(PublicAthlete):
+    fecha_silencio: datetime
+
+
+class ChatPreferencesUpdate(CamelAPIModel):
+    """Changes to the list of muted people, applied together or not at all."""
+
+    mute_user_ids: list[UUID] = Field(default_factory=list, max_length=100)
+    unmute_user_ids: list[UUID] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="after")
+    def valid_changes(self) -> ChatPreferencesUpdate:
+        if not self.mute_user_ids and not self.unmute_user_ids:
+            raise ValueError("Envía al menos una persona para silenciar o dejar de silenciar.")
+        if len(set(self.mute_user_ids)) != len(self.mute_user_ids) or len(set(self.unmute_user_ids)) != len(self.unmute_user_ids):
+            raise ValueError("No repitas personas en una misma lista.")
+        if set(self.mute_user_ids) & set(self.unmute_user_ids):
+            raise ValueError("Una persona no puede silenciarse y dejar de silenciarse a la vez.")
+        return self
+
+
+class ChatPreferences(APIModel):
+    muted_users: list[MutedUser]
 
 
 class ReportCreate(APIModel):

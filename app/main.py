@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import math
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from app.api.v1.users import router
 from app.core.config import get_database_url, get_email_settings, get_settings
@@ -11,6 +15,12 @@ from app.database.session import create_pool
 from app.repositories.base import UserRepository
 from app.repositories.postgres_user_repository import PostgresUserRepository
 from app.services.email_sender import EmailSender
+
+
+def _finite_or_text(value: float):
+    """A number such as 1e999 reaches validation as infinity, which JSON cannot carry: the error
+    message that echoes the received value would fail to serialize and answer 500 instead of 422."""
+    return value if math.isfinite(value) else str(value)
 
 
 def create_app(
@@ -50,6 +60,12 @@ def create_app(
     )
     if repository is not None:
         app.state.repository = repository
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(_, error: RequestValidationError) -> JSONResponse:
+        # The same 422 body as FastAPI's own, but able to carry an infinite number.
+        return JSONResponse(status_code=422, content={"detail": jsonable_encoder(
+            error.errors(), custom_encoder={float: _finite_or_text})})
     if email_sender is not None:
         app.state.email_sender = email_sender
     app.include_router(router)

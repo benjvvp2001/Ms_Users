@@ -12,6 +12,7 @@ from psycopg_pool import ConnectionPool
 from app.repositories.base import (
     ATHLETE_ROLES,
     EmailVerificationRecord,
+    LocationRecord,
     NewEmailVerification,
     PasswordResetRecord,
     ReportRecord,
@@ -391,6 +392,7 @@ class PostgresUserRepository:
             with conn.cursor() as cur:
                 # Keep notifications, memberships and payments consistent. An
                 # inactive account cannot log in or use previously issued JWTs.
+                cur.execute("DELETE FROM ubicacion_actual WHERE usuario_id = %s", (user_id,))
                 cur.execute(
                     "UPDATE usuario SET is_active = FALSE, "
                     "fecha_actualizacion = CURRENT_TIMESTAMP "
@@ -400,9 +402,10 @@ class PostgresUserRepository:
 
     def list_suggestion_candidates(
         self, *, exclude_user_id: UUID, limit: int, filters: SuggestionFilters,
-        origin: Zona | None, sports: list[UserSport]
+        origin: Zona | LocationRecord | None, sports: list[UserSport], fresh_since: datetime
     ) -> list[SuggestionCandidate]:
         params = {
+            "fresh_since": fresh_since,
             **filters.model_dump(), "user_id": exclude_user_id, "limit": limit,
             "roles": list(ATHLETE_ROLES), "sports": Jsonb([s.model_dump() for s in sports]),
             "latitude": origin.latitud if origin else None,
@@ -440,6 +443,31 @@ class PostgresUserRepository:
             for row in rows
         ]
 
+    def get_location(self, user_id: UUID) -> LocationRecord | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT latitud::float8, longitud::float8, precision_m, actualizada_en "
+                "FROM ubicacion_actual WHERE usuario_id = %s", (user_id,),
+            ).fetchone()
+        return LocationRecord(*row) if row else None
+
+    def save_location(self, user_id: UUID, latitud: float, longitud: float, precision_m: int | None) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO ubicacion_actual (usuario_id, latitud, longitud, precision_m) VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT (usuario_id) DO UPDATE SET latitud = EXCLUDED.latitud, longitud = EXCLUDED.longitud, "
+                "precision_m = EXCLUDED.precision_m, actualizada_en = CURRENT_TIMESTAMP",
+                (user_id, latitud, longitud, precision_m),
+            )
+
+    def touch_location(self, user_id: UUID) -> None:
+        with self._pool.connection() as conn:
+            conn.execute("UPDATE ubicacion_actual SET actualizada_en = CURRENT_TIMESTAMP WHERE usuario_id = %s", (user_id,))
+
+    def delete_location(self, user_id: UUID) -> bool:
+        with self._pool.connection() as conn:
+            return conn.execute("DELETE FROM ubicacion_actual WHERE usuario_id = %s", (user_id,)).rowcount > 0
+
     def record_audit(
         self, *, user_id: UUID, action: str, resource: str, result: str
     ) -> None:
@@ -453,12 +481,52 @@ class PostgresUserRepository:
                     (uuid4(), user_id, action, resource, result),
                 )
 
-    def block_user(self, blocker_id: UUID, blocked_id: UUID) -> None:
+    def block_user(self, blocker_id: UUID, blocked_id: UUID) -> bool:
         with self._pool.connection() as conn:
-            conn.execute(
+            cur = conn.execute(
                 "INSERT INTO bloqueo_usuario (bloqueador_id, bloqueado_id) VALUES (%s, %s) "
                 "ON CONFLICT DO NOTHING", (blocker_id, blocked_id),
             )
+            return cur.rowcount == 1
+
+    def blocked_between(self, user_a: UUID, user_b: UUID) -> bool:
+        with self._pool.connection() as conn:
+            return conn.execute(
+                "SELECT 1 FROM bloqueo_usuario WHERE (bloqueador_id = %s AND bloqueado_id = %s) "
+                "OR (bloqueador_id = %s AND bloqueado_id = %s)", (user_a, user_b, user_b, user_a),
+            ).fetchone() is not None
+
+    def blocked_with(self, user_id: UUID, others: list[UUID]) -> set[UUID]:
+        if not others:
+            return set()
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT bloqueado_id FROM bloqueo_usuario WHERE bloqueador_id = %(me)s AND bloqueado_id = ANY(%(ids)s) "
+                "UNION SELECT bloqueador_id FROM bloqueo_usuario WHERE bloqueado_id = %(me)s AND bloqueador_id = ANY(%(ids)s)",
+                {"me": user_id, "ids": others},
+            ).fetchall()
+        return {row[0] for row in rows}
+
+    def change_mutes(self, muter_id: UUID, mute: list[UUID], unmute: list[UUID]) -> None:
+        with self._pool.connection() as conn, conn.transaction():
+            if unmute:
+                conn.execute(
+                    "DELETE FROM silencio_usuario WHERE silenciador_id = %s AND silenciado_id = ANY(%s)",
+                    (muter_id, unmute),
+                )
+            if mute:
+                conn.execute(
+                    "INSERT INTO silencio_usuario (silenciador_id, silenciado_id) "
+                    "SELECT %s, unnest(%s::uuid[]) ON CONFLICT DO NOTHING", (muter_id, mute),
+                )
+
+    def list_muted(self, muter_id: UUID) -> list[tuple[UUID, datetime]]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT silenciado_id, fecha_creacion FROM silencio_usuario "
+                "WHERE silenciador_id = %s ORDER BY fecha_creacion DESC, silenciado_id", (muter_id,),
+            ).fetchall()
+        return [(row[0], row[1]) for row in rows]
 
     def unblock_user(self, blocker_id: UUID, blocked_id: UUID) -> None:
         with self._pool.connection() as conn:

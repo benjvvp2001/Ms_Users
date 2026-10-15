@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import RLock
 from uuid import UUID, uuid4
 
 from app.core.recommendations import compatibility, distance_km, matches_filters, similar_level
 from app.repositories.base import (
+    LocationRecord,
     ATHLETE_ROLES,
     AuditEvent,
     EmailVerificationRecord,
@@ -28,7 +29,10 @@ class MockUserRepository:
         self._password_resets: dict[UUID, PasswordResetRecord] = {}
         self._email_verifications: dict[UUID, EmailVerificationRecord] = {}
         self._blocks: dict[tuple[UUID, UUID], datetime] = {}
+        self._mutes: dict[tuple[UUID, UUID], datetime] = {}
+        self._last_tick: datetime | None = None
         self._reports: dict[UUID, ReportRecord] = {}
+        self._locations: dict[UUID, LocationRecord] = {}
         self._lock = RLock()
 
     def create_user(
@@ -140,10 +144,11 @@ class MockUserRepository:
 
     def delete_user(self, user_id: UUID) -> bool:
         with self._lock:
+            self._locations.pop(user_id, None)
             return self._users.pop(user_id, None) is not None
 
     def list_suggestion_candidates(
-        self, *, exclude_user_id: UUID, limit: int, filters, origin, sports
+        self, *, exclude_user_id: UUID, limit: int, filters, origin, sports, fresh_since
     ) -> list[SuggestionCandidate]:
         with self._lock:
             # Dicts keep insertion order, so reversed() is newest first.
@@ -164,7 +169,7 @@ class MockUserRepository:
                     foto_perfil=user.profile.foto_perfil,
                     biografia=user.profile.biografia,
                     deportes=list(user.preferences.deportes),
-                    distancia_km=distance_km(origin, user.preferences.zona),
+                    distancia_km=distance_km(origin, self._position(user, fresh_since)),
                     nivel_coincidente=similar_level(sports, user.preferences.deportes),
                 )
                 for user in users
@@ -295,9 +300,62 @@ class MockUserRepository:
             user.email_verified = True
             return True
 
-    def block_user(self, blocker_id: UUID, blocked_id: UUID) -> None:
+    def _position(self, user, fresh_since: datetime):
+        live = self._locations.get(user.id)
+        return live if live is not None and live.actualizada_en >= fresh_since else user.preferences.zona
+
+    def get_location(self, user_id: UUID) -> LocationRecord | None:
         with self._lock:
-            self._blocks.setdefault((blocker_id, blocked_id), datetime.now(timezone.utc))
+            return self._locations.get(user_id)
+
+    def save_location(self, user_id: UUID, latitud: float, longitud: float, precision_m: int | None) -> None:
+        with self._lock:
+            self._locations[user_id] = LocationRecord(latitud, longitud, precision_m, self._tick())
+
+    def touch_location(self, user_id: UUID) -> None:
+        with self._lock:
+            if user_id in self._locations:
+                self._locations[user_id] = replace(self._locations[user_id], actualizada_en=self._tick())
+
+    def delete_location(self, user_id: UUID) -> bool:
+        with self._lock:
+            return self._locations.pop(user_id, None) is not None
+
+    def _tick(self) -> datetime:
+        """Now, strictly increasing: the system clock can repeat a value (Windows) and the lists are
+        ordered by these dates. PostgreSQL's CURRENT_TIMESTAMP is per transaction and needs no help."""
+        now = datetime.now(timezone.utc)
+        if self._last_tick is not None and now <= self._last_tick:
+            now = self._last_tick + timedelta(microseconds=1)
+        self._last_tick = now
+        return now
+
+    def block_user(self, blocker_id: UUID, blocked_id: UUID) -> bool:
+        with self._lock:
+            created = (blocker_id, blocked_id) not in self._blocks
+            self._blocks.setdefault((blocker_id, blocked_id), self._tick())
+            return created
+
+    def blocked_between(self, user_a: UUID, user_b: UUID) -> bool:
+        with self._lock:
+            return (user_a, user_b) in self._blocks or (user_b, user_a) in self._blocks
+
+    def blocked_with(self, user_id: UUID, others: list[UUID]) -> set[UUID]:
+        with self._lock:
+            return {other for other in others
+                    if (user_id, other) in self._blocks or (other, user_id) in self._blocks}
+
+    def change_mutes(self, muter_id: UUID, mute: list[UUID], unmute: list[UUID]) -> None:
+        with self._lock:
+            for user_id in unmute:
+                self._mutes.pop((muter_id, user_id), None)
+            for user_id in mute:
+                self._mutes.setdefault((muter_id, user_id), self._tick())
+
+    def list_muted(self, muter_id: UUID) -> list[tuple[UUID, datetime]]:
+        with self._lock:
+            rows = [(muted, at) for (muter, muted), at in self._mutes.items() if muter == muter_id]
+        return sorted(rows, key=lambda row: (row[1], str(row[0])), reverse=True)
 
     def unblock_user(self, blocker_id: UUID, blocked_id: UUID) -> None:
         with self._lock:

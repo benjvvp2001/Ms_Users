@@ -6,6 +6,8 @@ La base activa es `sportmach_users` en PostgreSQL local:5432. La variable canón
 
 El rol existente de `rol.id` es integer y se conserva; el repositorio también funciona con los UUID del esquema original del compañero. Las tablas de preferencias de esta API son independientes de las de matching. Los planes, membresías y pagos existentes siguen en USERS y no se trasladan.
 
+`006_reports_blocks.sql` crea `bloqueo_usuario` y `reporte`, y `007_chat_mutes.sql` crea `silencio_usuario`; `008_current_location.sql` crea `ubicacion_actual` (última posición de cada deportista, una fila por persona, para recomendar personas cercanas) (HU-51: personas silenciadas por cada usuario, con la misma forma que los bloqueos; ambas tablas se borran en cascada con la cuenta). Las HU-42 y HU-51 reutilizan `bloqueo_usuario`; no existe una tabla `user_blocks` aparte.
+
 Las instrucciones siguientes documentan el diseño original para una instalación nueva; para esta integración sigue [la guía del gateway](../../Ms_gateway/README.md).
 
 Este esquema es el que efectivamente pertenece al microservicio de usuarios,

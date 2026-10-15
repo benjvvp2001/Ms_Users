@@ -68,6 +68,23 @@ def _positive_int(name: str, default: str) -> int:
     return value
 
 
+@dataclass(frozen=True)
+class LocationSettings:
+    """How the live position is kept. Both values are provisional until product defines them."""
+
+    # The app sends a new position after moving at least this far; the service ignores smaller moves.
+    min_move_meters: int
+    # A position older than this is not used for recommendations (the profile zone is used instead).
+    max_age_minutes: int
+
+
+def get_location_settings() -> LocationSettings:
+    return LocationSettings(
+        min_move_meters=_positive_int("LOCATION_MIN_MOVE_METERS", "200"),
+        max_age_minutes=_positive_int("LOCATION_MAX_AGE_MINUTES", "1440"),
+    )
+
+
 def _flag(name: str, default: str) -> bool:
     return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
 

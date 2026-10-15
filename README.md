@@ -192,6 +192,65 @@ si todavía no declaró deportes. Los errores de conexión o sesión se muestran
 con una opción para reintentar o iniciar sesión; no se sustituyen por perfiles
 de ejemplo. Las solicitudes y matches requieren integrar el servicio de matching.
 
+## Bloquear y silenciar (HU-51)
+
+Los bloqueos ya existían (HU-42, tabla `bloqueo_usuario`); la HU-51 los hace impedir el contacto y
+agrega los silencios. Todas las rutas requieren sesión.
+
+| Método | Ruta | Uso |
+|---|---|---|
+| POST | `/block` | `{"blockedUserId": "uuid"}`. `201` con la persona bloqueada; `200` si ya lo estaba (conserva la fecha). También acepta `blocked_user_id`. |
+| DELETE | `/block/{id}` | Desbloquea. `204` siempre (idempotente). |
+| GET | `/blocks/me` | Las personas que bloqueé, la más reciente primero. |
+| GET | `/blocks/check?userA=…&userB=…` | `{"blocked": true/false}`: si alguna de las dos bloqueó a la otra. Para que otros servicios lo consulten. |
+| GET | `/chat-preferences` | Las personas que silencié: `{"muted_users": [...]}`. |
+| PATCH | `/chat-preferences` | `{"muteUserIds": [...], "unmuteUserIds": [...]}` (hasta 100 cada una, sin repetir ni cruzarse). Todo o nada. |
+| PUT, DELETE, GET | `/me/blocks[/{id}]` | Las rutas anteriores; comparten la misma tabla y siguen funcionando. |
+
+**Qué hace un bloqueo.** Bloquear corta el contacto en ambos sentidos, sea quien sea el que bloqueó:
+las dos personas dejan de verse en Descubrir **y `Ms_Users` deja de entregar la tarjeta de la otra**
+(`GET /athletes/{id}` responde 404 y `POST /athletes/cards` la omite, igual que a una cuenta
+desactivada). Matching y Actividades piden esa tarjeta antes de cada solicitud, mensaje o listado, así
+que sin cambiar esos servicios: no se pueden enviar solicitudes ni mensajes, no se puede abrir el chat,
+y el match desaparece de la lista de ambos. **Nada se borra:** al desbloquear, el chat vuelve con su
+historial. Esto reemplaza la regla de la HU-42 («el bloqueo no toca matches, chats ni actividades»).
+
+**`/blocks/check`.** Responde solo si existe un bloqueo, nunca quién lo puso, y solo a una de las dos
+personas (con su token) o a un administrador; cualquier otra cuenta recibe 403, para que nadie pueda
+averiguar quién bloqueó a quién. La persona bloqueada que consulta sí puede deducir que existe un
+bloqueo, así que quien lo use debe mostrar un mensaje genérico («no disponible»).
+
+**Silenciar no es bloquear.** Quien silencia sigue pudiendo recibir mensajes y ver a la otra persona;
+solo se guarda la lista (`silencio_usuario`, privada: la persona silenciada no se entera). Desde la
+interfaz un silencio de una conversación directa equivale a silenciar a esa persona. Que la lista apague
+las notificaciones depende de que quien las envía (el gateway) la consulte.
+
+La migración `007_chat_mutes.sql` crea `silencio_usuario`; `python -m app.database.migrate` (y `users_migrate`
+en Compose) la aplica junto con las anteriores.
+
+## Ubicación en vivo (recomendar personas cercanas)
+
+La zona del perfil (`preferencia_perfil`) es fija. Como el deportista se mueve, la app además informa su posición
+actual y las sugerencias (`GET /suggestions`, con `radius_km`) usan **la posición en vivo si es reciente** y, si no,
+la zona del perfil, tanto para quien consulta como para cada candidato.
+
+| Método | Ruta | Qué hace |
+|---|---|---|
+| GET | `/location` | `{"has_location", "updated_at", "min_distance_meters", "max_age_minutes"}`. Nunca devuelve coordenadas. |
+| PUT | `/location` | `{"latitud", "longitud", "precision_m"?}`. Guarda la posición y responde `updated: true`. Si el movimiento respecto de la última guardada es menor a `min_distance_meters`, no la cambia (`updated: false`). |
+| DELETE | `/location` | Borra la posición guardada (204, repetible). |
+
+- **Cada cuánto enviar:** la app envía al recorrer `min_distance_meters` desde la última posición enviada (el valor se
+  consulta con `GET /location`, así app y servicio usan el mismo). **Esa distancia aún no está definida**: por ahora
+  `LOCATION_MIN_MOVE_METERS=200`. Una posición con más de `LOCATION_MAX_AGE_MINUTES` (por ahora 1440, un día) no se
+  usa y se vuelve a la zona del perfil. Si la persona está quieta, un envío menor al umbral solo renueva la fecha
+  (como mucho cada 15 minutos) para que su posición no caduque.
+- **Privacidad:** se guarda una sola fila por persona (la última posición, sin historial); las coordenadas no salen
+  del servicio —las tarjetas solo muestran una distancia redondeada— y no se registran en auditoría. Solo roles
+  deportista (`player`/`usuario`); otros roles reciben 403. Se borra con `DELETE /location` o al eliminar la cuenta.
+- La migración `008_current_location.sql` crea `ubicacion_actual`; `python -m app.database.migrate` la aplica.
+  **Sin ella, las sugerencias fallan** (la consulta la une): aplicarla antes de desplegar.
+
 ## Verificación de correo
 
 Una cuenta nueva queda **inactiva hasta verificar su correo**:

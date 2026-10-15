@@ -35,6 +35,16 @@ class StoredUser:
 
 
 @dataclass(frozen=True)
+class LocationRecord:
+    """Last known position; has latitud/longitud so it can be used wherever a Zona is."""
+
+    latitud: float
+    longitud: float
+    precision_m: int | None
+    actualizada_en: datetime
+
+
+@dataclass(frozen=True)
 class AuditEvent:
     user_id: UUID
     action: str
@@ -131,10 +141,23 @@ class UserRepository(Protocol):
 
     def list_suggestion_candidates(
         self, *, exclude_user_id: UUID, limit: int, filters: SuggestionFilters,
-        origin: Zona | None, sports: list[UserSport]
+        origin: Zona | LocationRecord | None, sports: list[UserSport], fresh_since: datetime
     ) -> list[SuggestionCandidate]:
-        """Filter and rank eligible athletes before applying the result limit."""
+        """Filter and rank eligible athletes before applying the result limit. A candidate's distance uses
+        their live position when it is newer than `fresh_since`, otherwise their profile zone."""
         ...
+
+    def get_location(self, user_id: UUID) -> LocationRecord | None: ...
+
+    def save_location(self, user_id: UUID, latitud: float, longitud: float, precision_m: int | None) -> None:
+        """Insert or replace the one row of this person."""
+        ...
+
+    def touch_location(self, user_id: UUID) -> None:
+        """Mark the saved position as current without changing it (the person has not moved)."""
+        ...
+
+    def delete_location(self, user_id: UUID) -> bool: ...
 
     def record_audit(
         self, *, user_id: UUID, action: str, resource: str, result: str
@@ -178,8 +201,24 @@ class UserRepository(Protocol):
         """Mark the email as verified if that code is still the pending one."""
         ...
 
-    def block_user(self, blocker_id: UUID, blocked_id: UUID) -> None:
-        """Idempotent: blocking twice keeps the original date."""
+    def block_user(self, blocker_id: UUID, blocked_id: UUID) -> bool:
+        """Idempotent: blocking twice keeps the original date. True only when the block is new."""
+        ...
+
+    def blocked_between(self, user_a: UUID, user_b: UUID) -> bool:
+        """Whether either of them has blocked the other."""
+        ...
+
+    def blocked_with(self, user_id: UUID, others: list[UUID]) -> set[UUID]:
+        """Those of `others` that have a block with `user_id`, whoever blocked whom."""
+        ...
+
+    def change_mutes(self, muter_id: UUID, mute: list[UUID], unmute: list[UUID]) -> None:
+        """Mute and unmute people together; muting twice keeps the original date."""
+        ...
+
+    def list_muted(self, muter_id: UUID) -> list[tuple[UUID, datetime]]:
+        """(muted user, muted at), newest first."""
         ...
 
     def unblock_user(self, blocker_id: UUID, blocked_id: UUID) -> None: ...

@@ -8,12 +8,18 @@ from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Qu
 from app.api.dependencies import get_current_user, get_user_service
 from app.repositories.base import StoredUser
 from app.schemas.user import (
+    BlockCheck,
+    BlockCreate,
     BlockedUser,
+    ChatPreferences,
+    ChatPreferencesUpdate,
     ConsentCreate,
     ConsentRead,
     DataExport,
     EmailVerificationConfirm,
     EmailVerificationRequest,
+    LocationStatus,
+    LocationUpdate,
     LoginRequest,
     MessageResponse,
     PasswordResetConfirm,
@@ -161,6 +167,102 @@ def unblock_user(
     service: UserService = Depends(get_user_service),
 ) -> Response:
     service.unblock(current_user, user_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/block", response_model=BlockedUser, status_code=status.HTTP_201_CREATED,
+             summary="Bloquear a una persona: ninguna puede escribirle ni verle a la otra")
+def block_by_body(
+    payload: BlockCreate,
+    response: Response,
+    current_user: StoredUser = Depends(get_current_user),
+    service: UserService = Depends(get_user_service),
+) -> BlockedUser:
+    """201 when the block is new, 200 when it already existed."""
+    if not service.block(current_user, payload.blocked_user_id):
+        response.status_code = status.HTTP_200_OK
+    return service.blocked_user(current_user, payload.blocked_user_id)
+
+
+@router.delete("/block/{blocked_user_id}", status_code=status.HTTP_204_NO_CONTENT,
+               summary="Desbloquear (idempotente)")
+def unblock_by_path(
+    blocked_user_id: UUID,
+    current_user: StoredUser = Depends(get_current_user),
+    service: UserService = Depends(get_user_service),
+) -> Response:
+    service.unblock(current_user, blocked_user_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/blocks/me", response_model=list[BlockedUser], summary="Personas que he bloqueado")
+def my_blocks(
+    current_user: StoredUser = Depends(get_current_user),
+    service: UserService = Depends(get_user_service),
+) -> list[BlockedUser]:
+    return service.list_blocked(current_user)
+
+
+@router.get("/blocks/check", response_model=BlockCheck,
+            summary="¿Hay un bloqueo entre dos personas? (para otros servicios)",
+            description="Solo lo puede consultar una de las dos personas (con su token) o un administrador. "
+            "Responde si existe un bloqueo, nunca quién lo puso.")
+def check_blocks(
+    user_a: Annotated[UUID, Query(alias="userA")],
+    user_b: Annotated[UUID, Query(alias="userB")],
+    current_user: StoredUser = Depends(get_current_user),
+    service: UserService = Depends(get_user_service),
+) -> BlockCheck:
+    return service.check_block(current_user, user_a, user_b)
+
+
+@router.get("/chat-preferences", response_model=ChatPreferences, summary="Personas silenciadas")
+def get_chat_preferences(
+    current_user: StoredUser = Depends(get_current_user),
+    service: UserService = Depends(get_user_service),
+) -> ChatPreferences:
+    return service.chat_preferences(current_user)
+
+
+@router.patch("/chat-preferences", response_model=ChatPreferences,
+              summary="Silenciar o dejar de silenciar personas",
+              description="`muteUserIds` y `unmuteUserIds` (hasta 100 cada una, sin repetir ni cruzarse). "
+              "Silenciar no impide que te escriban: solo apaga sus notificaciones de chat.")
+def update_chat_preferences(
+    payload: ChatPreferencesUpdate,
+    current_user: StoredUser = Depends(get_current_user),
+    service: UserService = Depends(get_user_service),
+) -> ChatPreferences:
+    return service.update_chat_preferences(current_user, payload)
+
+
+@router.get("/location", response_model=LocationStatus, summary="¿Hay una ubicación guardada?",
+            description="Solo indica si existe y los umbrales vigentes; nunca devuelve coordenadas.")
+def get_location(
+    current_user: StoredUser = Depends(get_current_user),
+    service: UserService = Depends(get_user_service),
+) -> LocationStatus:
+    return service.get_location(current_user)
+
+
+@router.put("/location", response_model=LocationStatus, summary="Actualizar mi ubicación actual",
+            description="La app la envía al recorrer `min_distance_meters` desde la última enviada (se consulta con GET). "
+            "Si el movimiento es menor, la posición guardada no cambia y `updated` es false. Se usa solo para recomendar "
+            "personas cercanas; no se comparte ni se devuelve.")
+def update_location(
+    payload: LocationUpdate,
+    current_user: StoredUser = Depends(get_current_user),
+    service: UserService = Depends(get_user_service),
+) -> LocationStatus:
+    return service.update_location(current_user, payload)
+
+
+@router.delete("/location", status_code=status.HTTP_204_NO_CONTENT, summary="Borrar mi ubicación actual")
+def delete_location(
+    current_user: StoredUser = Depends(get_current_user),
+    service: UserService = Depends(get_user_service),
+) -> Response:
+    service.delete_location(current_user)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

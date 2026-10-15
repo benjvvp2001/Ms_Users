@@ -6,7 +6,7 @@ from uuid import UUID
 from fastapi import BackgroundTasks, HTTPException, status
 
 from app.core.config import get_email_settings
-from app.core.config import EmailSettings
+from app.core.config import EmailSettings, LocationSettings, get_location_settings
 from app.core.security import (
     create_access_token,
     generate_one_time_code,
@@ -19,6 +19,7 @@ from app.core.security import (
 )
 from app.repositories.base import (
     ATHLETE_ROLES,
+    LocationRecord,
     NewEmailVerification,
     ReportRecord,
     StoredUser,
@@ -27,12 +28,18 @@ from app.repositories.base import (
 )
 from app.schemas.user import (
     AuthenticatedUser,
+    BlockCheck,
     BlockedUser,
+    ChatPreferences,
+    ChatPreferencesUpdate,
+    MutedUser,
     ConsentCreate,
     ConsentRead,
     DataExport,
     EmailVerificationConfirm,
     EmailVerificationRequest,
+    LocationStatus,
+    LocationUpdate,
     LoginRequest,
     MessageResponse,
     PasswordResetConfirm,
@@ -51,7 +58,7 @@ from app.schemas.user import (
     TokenResponse,
     UserSport,
 )
-from app.core.recommendations import compatibility, similar_level
+from app.core.recommendations import compatibility, distance_km, similar_level
 from app.services.email_sender import (
     EmailSender,
     deliver_safely,
@@ -85,10 +92,12 @@ class UserService:
     """
 
     def __init__(
-        self, repository: UserRepository, email_sender: EmailSender | None = None
+        self, repository: UserRepository, email_sender: EmailSender | None = None,
+        location: LocationSettings | None = None,
     ) -> None:
         self._repository = repository
         self._email_sender = email_sender
+        self._location = location or get_location_settings()
 
     # -- auth -----------------------------------------------------------
 
@@ -355,11 +364,19 @@ class UserService:
     # -- suggestions ------------------------------------------------------
 
     def athlete_cards(self, current_user: StoredUser, user_ids: list[UUID]) -> list[SuggestedUser]:
-        """Public directory for matching, including profiles outside the suggestions window."""
+        """Public directory for matching, including profiles outside the suggestions window.
+
+        A person with a block against the caller (either way) is left out, exactly like a deactivated
+        account. Matching and Activities ask for this card before any request, message or listing, so
+        this is what stops two people who blocked each other from reaching each other."""
         if current_user.role not in ATHLETE_ROLES or not current_user.email_verified:
             raise HTTPException(status_code=403, detail="Solo deportistas verificados pueden hacer match.")
         cards = []
-        for user_id in dict.fromkeys(user_ids):
+        ids = list(dict.fromkeys(user_ids))
+        blocked = self._repository.blocked_with(current_user.id, ids)
+        for user_id in ids:
+            if user_id in blocked:
+                continue
             user = self._repository.get_user(user_id)
             if user is None or user.role not in ATHLETE_ROLES or not user.email_verified:
                 continue
@@ -374,12 +391,15 @@ class UserService:
 
     def list_suggestions(self, current_user: StoredUser, limit: int, filters: SuggestionFilters | None = None) -> list[SuggestedUser]:
         filters = filters or SuggestionFilters(limit=limit)
-        origin = current_user.preferences.zona
+        fresh_since = self._fresh_since()
+        # Where the person is now if the app reported it recently; otherwise the fixed zone of the profile.
+        live = self._repository.get_location(current_user.id)
+        origin = live if live is not None and live.actualizada_en >= fresh_since else current_user.preferences.zona
         if filters.radius_km is not None and (origin is None or origin.latitud is None):
             raise HTTPException(422, "Activa tu ubicación en el perfil para filtrar por distancia.")
         candidates = self._repository.list_suggestion_candidates(
             exclude_user_id=current_user.id, limit=limit, filters=filters,
-            origin=origin, sports=current_user.preferences.deportes,
+            origin=origin, sports=current_user.preferences.deportes, fresh_since=fresh_since,
         )
         ranked = [self._as_suggestion(candidate, current_user.preferences.deportes) for candidate in candidates]
         self._repository.record_audit(
@@ -390,16 +410,73 @@ class UserService:
         )
         return ranked[:limit]
 
+    # -- live location --------------------------------------------------------
+
+    def _fresh_since(self) -> datetime:
+        return datetime.now(timezone.utc) - timedelta(minutes=self._location.max_age_minutes)
+
+    def _location_status(self, record: LocationRecord | None, updated: bool | None = None) -> LocationStatus:
+        return LocationStatus(
+            has_location=record is not None, updated=updated,
+            updated_at=record.actualizada_en if record else None,
+            min_distance_meters=self._location.min_move_meters, max_age_minutes=self._location.max_age_minutes,
+        )
+
+    @staticmethod
+    def _require_athlete(user: StoredUser) -> None:
+        if user.role not in ATHLETE_ROLES:
+            raise HTTPException(403, "Solo los deportistas comparten su ubicación.")
+
+    def get_location(self, user: StoredUser) -> LocationStatus:
+        """Whether a position is saved and the thresholds; the coordinates are never returned."""
+        self._require_athlete(user)
+        return self._location_status(self._repository.get_location(user.id))
+
+    def update_location(self, user: StoredUser, payload: LocationUpdate) -> LocationStatus:
+        """Keeps one position per person. A move shorter than the minimum distance leaves it as it was
+        (it only renews its date now and then, so a person who stays still does not expire)."""
+        self._require_athlete(user)
+        current = self._repository.get_location(user.id)
+        moved_meters = None if current is None else 1000 * distance_km(current, payload)
+        if current is None or moved_meters >= self._location.min_move_meters:
+            self._repository.save_location(user.id, payload.latitud, payload.longitud, payload.precision_m)
+            updated = True
+        else:
+            updated = False
+            if datetime.now(timezone.utc) - current.actualizada_en >= TOUCH_AFTER:
+                self._repository.touch_location(user.id)
+        return self._location_status(self._repository.get_location(user.id), updated)
+
+    def delete_location(self, user: StoredUser) -> None:
+        self._require_athlete(user)
+        self._repository.delete_location(user.id)
+
     # -- blocks and reports ---------------------------------------------------
 
-    def block(self, current_user: StoredUser, user_id: UUID) -> None:
-        """Hides both people from each other in Discover; matches, chats and activities stay."""
+    def block(self, current_user: StoredUser, user_id: UUID) -> bool:
+        """Cuts contact both ways: they vanish from each other in Discover and neither one's athlete
+        card is served to the other, so neither can send requests or messages. Matches, messages and
+        activities are kept and come back when the block is lifted. True when the block is new."""
         if user_id == current_user.id:
             raise HTTPException(422, "No puedes bloquearte a ti mismo.")
         self._get_user_or_404(user_id)
-        self._repository.block_user(current_user.id, user_id)
+        created = self._repository.block_user(current_user.id, user_id)
         self._repository.record_audit(user_id=current_user.id, action="block_user",
                                       resource=f"users/{user_id}", result="success")
+        return created
+
+    def blocked_user(self, current_user: StoredUser, user_id: UUID) -> BlockedUser:
+        """The person as the block list shows them."""
+        blocked_at = dict(self._repository.list_blocked(current_user.id))[user_id]
+        return BlockedUser(**self._as_public(self._get_user_or_404(user_id)).model_dump(), fecha_bloqueo=blocked_at)
+
+    def check_block(self, current_user: StoredUser, user_a: UUID, user_b: UUID) -> BlockCheck:
+        """For other services to ask before letting two people interact. It only answers whether a block
+        exists, never who placed it, and only to one of the two people (or an admin): anyone else could
+        otherwise map who blocked whom."""
+        if current_user.role != "admin" and current_user.id not in (user_a, user_b):
+            raise HTTPException(403, "Solo puedes consultar bloqueos en los que participas.")
+        return BlockCheck(blocked=user_a != user_b and self._repository.blocked_between(user_a, user_b))
 
     def unblock(self, current_user: StoredUser, user_id: UUID) -> None:
         self._repository.unblock_user(current_user.id, user_id)
@@ -413,6 +490,27 @@ class UserService:
             if user is not None:
                 blocked.append(BlockedUser(**self._as_public(user).model_dump(), fecha_bloqueo=blocked_at))
         return blocked
+
+    # -- muted people (chat preferences) -------------------------------------------
+
+    def chat_preferences(self, current_user: StoredUser) -> ChatPreferences:
+        muted = []
+        for user_id, muted_at in self._repository.list_muted(current_user.id):
+            user = self._repository.get_user(user_id)
+            if user is not None:
+                muted.append(MutedUser(**self._as_public(user).model_dump(), fecha_silencio=muted_at))
+        return ChatPreferences(muted_users=muted)
+
+    def update_chat_preferences(self, current_user: StoredUser, payload: ChatPreferencesUpdate) -> ChatPreferences:
+        """Mute and unmute together. Everyone to mute is checked first, so a wrong id changes nothing."""
+        if current_user.id in payload.mute_user_ids:
+            raise HTTPException(422, "No puedes silenciarte a ti mismo.")
+        for user_id in payload.mute_user_ids:
+            self._get_user_or_404(user_id)
+        self._repository.change_mutes(current_user.id, payload.mute_user_ids, payload.unmute_user_ids)
+        self._repository.record_audit(user_id=current_user.id, action="update_chat_preferences",
+                                      resource="users/me/chat-preferences", result="success")
+        return self.chat_preferences(current_user)
 
     def report(self, current_user: StoredUser, payload: ReportCreate) -> ReportRead:
         if payload.tipo == "usuario" and payload.objetivo_id == str(current_user.id):
@@ -646,6 +744,9 @@ class UserService:
             expires_in_seconds=expires_in_seconds,
             user=self._as_authenticated_user(user),
         )
+
+
+TOUCH_AFTER = timedelta(minutes=15)
 
 
 def _age(birth_date: date | None) -> int | None:

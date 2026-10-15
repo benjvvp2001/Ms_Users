@@ -1,5 +1,6 @@
 """Exercise the actual search SQL in an isolated schema, including >200 candidates."""
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -10,6 +11,9 @@ import pytest
 
 from app.repositories.postgres_user_repository import PostgresUserRepository
 from app.schemas.user import SuggestionFilters, UserSport, Zona
+
+
+FRESH = datetime.now(timezone.utc) - timedelta(days=1)
 
 
 @pytest.fixture
@@ -25,7 +29,7 @@ def directory():
             setup.execute(sql.SQL('SET search_path TO {}').format(sql.Identifier(schema)))
             migrations = Path(__file__).parents[1] / 'db/migrations'
             for name in ('001_users_schema.sql', '004_email_verification.sql', '005_profile_goals_zone.sql',
-                         '006_reports_blocks.sql'):
+                         '006_reports_blocks.sql', '008_current_location.sql'):
                 setup.execute((migrations / name).read_text())
             pool = ConnectionPool(dsn, kwargs={'options': f'-c search_path={schema}'}, min_size=1, max_size=2)
             pool.wait()
@@ -64,7 +68,7 @@ def test_real_sql_filters_before_limit_and_preserves_nearest_older_athlete(direc
     sports = [UserSport(deporte_codigo='running', nivel=3)]
     def search(**kwargs):
         return repo.list_suggestion_candidates(exclude_user_id=me, limit=50,
-            filters=SuggestionFilters(**kwargs), origin=origin, sports=sports)
+            filters=SuggestionFilters(**kwargs), origin=origin, sports=sports, fresh_since=FRESH)
     assert [c.id for c in search(radius_km=5, shared_sports=True, level_tolerance=1)] == [near]
     rows = search(radius_km=10, sport='running', min_level=3, max_level=4)
     assert [c.id for c in rows] == [near, middle]
@@ -72,7 +76,7 @@ def test_real_sql_filters_before_limit_and_preserves_nearest_older_athlete(direc
     assert rows[0].nivel_coincidente
     assert [c.id for c in search(radius_km=10, max_level=3)] == [middle]
     assert [c.id for c in repo.list_suggestion_candidates(exclude_user_id=me, limit=1,
-        filters=SuggestionFilters(radius_km=10), origin=origin, sports=sports)] == [near]
+        filters=SuggestionFilters(radius_km=10), origin=origin, sports=sports, fresh_since=FRESH)] == [near]
 
 
 def test_real_sql_requires_all_sport_filters_on_the_same_row(directory):
@@ -85,7 +89,7 @@ def test_real_sql_requires_all_sport_filters_on_the_same_row(directory):
     for filters in (SuggestionFilters(sport='running', min_level=2, max_level=4),
                     SuggestionFilters(shared_sports=True, level_tolerance=1)):
         rows = repo.list_suggestion_candidates(exclude_user_id=me, limit=50, filters=filters,
-            origin=None, sports=[UserSport(deporte_codigo='running', nivel=3)])
+            origin=None, sports=[UserSport(deporte_codigo='running', nivel=3)], fresh_since=FRESH)
         assert [c.id for c in rows] == [valid]
         assert rows[0].distancia_km is None
 
@@ -96,7 +100,7 @@ def test_real_sql_hides_blocked_people_both_ways_and_stores_reports(directory):
     me, blocked, other = add(None), add(None), add(None)
     def search(user):
         return {c.id for c in repo.list_suggestion_candidates(exclude_user_id=user, limit=50,
-            filters=SuggestionFilters(), origin=None, sports=[])}
+            filters=SuggestionFilters(), origin=None, sports=[], fresh_since=FRESH)}
     repo.block_user(me, blocked)
     repo.block_user(me, blocked)
     assert search(me) == {other}
