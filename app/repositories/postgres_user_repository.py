@@ -53,16 +53,17 @@ class PostgresUserRepository:
         profile: ProfileReplace,
         preferences: PreferencesReplace,
         email_verification: NewEmailVerification,
+        role: str = "player",
     ) -> StoredUser:
         user_id = uuid4()
         normalized_email = email.casefold()
         try:
             with self._pool.connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT id FROM rol WHERE nombre = 'player'")
+                    cur.execute("SELECT id FROM rol WHERE nombre = %s", (role,))
                     role_row = cur.fetchone()
                     if role_row is None:
-                        raise RuntimeError("default 'player' role is missing from rol")
+                        raise RuntimeError(f"role {role!r} is missing from rol")
                     role_id = role_row[0]
 
                     cur.execute(
@@ -127,7 +128,7 @@ class PostgresUserRepository:
             rut=rut,
             profile=profile,
             preferences=preferences,
-            role="player",
+            role=role,
             consents=[],
             email_verified=False,
         )

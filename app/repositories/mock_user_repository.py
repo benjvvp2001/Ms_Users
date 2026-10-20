@@ -44,6 +44,7 @@ class MockUserRepository:
         profile: ProfileReplace,
         preferences: PreferencesReplace,
         email_verification: NewEmailVerification,
+        role: str = "player",
     ) -> StoredUser:
         normalized_email = email.casefold()
         with self._lock:
@@ -59,6 +60,7 @@ class MockUserRepository:
                 rut=rut,
                 profile=profile,
                 preferences=preferences,
+                role=role,
                 email_verified=False,
             )
             self._users[user.id] = user

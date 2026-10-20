@@ -117,8 +117,10 @@ class UserRepository(Protocol):
         profile: ProfileReplace,
         preferences: PreferencesReplace,
         email_verification: NewEmailVerification,
+        role: str = "player",
     ) -> StoredUser:
-        """Create the account unverified, together with its first code."""
+        """Create the account unverified, together with its first code.
+        `role` is the rol.nombre to assign (club sign-up uses club_admin)."""
         ...
 
     def get_user(self, user_id: UUID) -> StoredUser | None: ...

@@ -56,6 +56,22 @@ def register(
 
 
 @router.post(
+    "/auth/register-club",
+    response_model=RegisterResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Registrar la cuenta de un representante de club",
+    description="Igual que /auth/register, pero la cuenta queda con el rol club_admin. "
+    "El club mismo se crea después en ms-club (POST /api/v1/clubs), ya con sesión.",
+)
+def register_club(
+    payload: RegisterRequest,
+    background_tasks: BackgroundTasks,
+    service: UserService = Depends(get_user_service),
+) -> RegisterResponse:
+    return service.register(payload, background_tasks, role="club_admin")
+
+
+@router.post(
     "/auth/email-verification/request",
     response_model=MessageResponse,
     status_code=status.HTTP_202_ACCEPTED,

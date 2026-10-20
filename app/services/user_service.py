@@ -102,10 +102,13 @@ class UserService:
     # -- auth -----------------------------------------------------------
 
     def register(
-        self, payload: RegisterRequest, background_tasks: BackgroundTasks
+        self,
+        payload: RegisterRequest,
+        background_tasks: BackgroundTasks,
+        role: str = "player",
     ) -> RegisterResponse:
         """Create the account inactive and email it a code; it gets a token
-        only after confirm_email_verification."""
+        only after confirm_email_verification. Club sign-up passes club_admin."""
         sender = self._require_email_sender()
         settings = get_email_settings()
         code = generate_one_time_code()
@@ -136,6 +139,7 @@ class UserService:
                     code_hash=hash_email_verification_code(code),
                     expires_at=self._verification_expiry(settings),
                 ),
+                role=role,
             )
         except ValueError as error:
             raise HTTPException(
@@ -145,7 +149,7 @@ class UserService:
 
         self._repository.record_audit(
             user_id=user.id,
-            action="register",
+            action="register" if role == "player" else "register_club",
             resource="users",
             result="success",
         )
