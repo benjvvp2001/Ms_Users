@@ -4,6 +4,7 @@ import os
 
 os.environ["JWT_SECRET"] = "test-only-secret-that-is-long-enough"
 
+import jwt
 from fastapi.testclient import TestClient
 
 from app.main import create_app
@@ -42,6 +43,19 @@ def test_verified_club_account_gets_a_club_admin_token() -> None:
     confirmed = client.post(VERIFY_CONFIRM_PATH, json={"email": CLUB["email"], "code": code})
     assert confirmed.status_code == 200
     assert confirmed.json()["user"]["role"] == "club_admin"
+
+
+def test_club_token_carries_the_verified_email_for_ms_club() -> None:
+    # Ms-club activates the administrator assignments made to this email.
+    client, _ = make_client()
+    assert client.post(REGISTER_CLUB_PATH, json={**CLUB, "email": "Admin2@Club.example.com"}).status_code == 201
+    code = client.app.state.email_sender.last_code("admin2@club.example.com")
+    confirmed = client.post(VERIFY_CONFIRM_PATH, json={"email": "admin2@club.example.com", "code": code})
+    claims = jwt.decode(confirmed.json()["access_token"], options={"verify_signature": False})
+    assert claims["email"] == "admin2@club.example.com"
+    login = client.post("/api/v1/users/auth/login",
+                        json={"email": "admin2@club.example.com", "password": CLUB["password"]})
+    assert jwt.decode(login.json()["access_token"], options={"verify_signature": False})["email"] ==         "admin2@club.example.com"
 
 
 def test_regular_registration_still_creates_a_player() -> None:

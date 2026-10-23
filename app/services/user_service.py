@@ -742,7 +742,7 @@ class UserService:
         )
 
     def _issue_token(self, user: StoredUser) -> TokenResponse:
-        token, expires_in_seconds = create_access_token(user.id, user.role)
+        token, expires_in_seconds = create_access_token(user.id, user.role, user.email)
         return TokenResponse(
             access_token=token,
             expires_in_seconds=expires_in_seconds,
