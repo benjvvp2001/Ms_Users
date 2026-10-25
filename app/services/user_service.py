@@ -747,7 +747,7 @@ class UserService:
         )
 
     def _issue_token(self, user: StoredUser) -> TokenResponse:
-        token, expires_in_seconds = create_access_token(user.id, user.role)
+        token, expires_in_seconds = create_access_token(user.id, user.role, user.email)
         # El rol decide el frontend: las cuentas de club van al sitio web, el resto a la app.
         es_club = user.role == CLUB_ROLE
         return TokenResponse(
