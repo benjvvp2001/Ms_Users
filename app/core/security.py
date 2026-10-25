@@ -52,7 +52,9 @@ def verify_email_verification_code(code: str, code_hash: str) -> bool:
     return hmac.compare_digest(hash_email_verification_code(code), code_hash)
 
 
-def create_access_token(user_id: UUID, role: str = "player") -> tuple[str, int]:
+def create_access_token(
+    user_id: UUID, role: str = "player", email: str | None = None
+) -> tuple[str, int]:
     settings = get_settings()
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(
@@ -65,6 +67,9 @@ def create_access_token(user_id: UUID, role: str = "player") -> tuple[str, int]:
             "iss": settings.jwt_issuer, "aud": settings.jwt_audience,
             "token_type": "access", "roles": [role],
             "scope": "profile:read profile:write" + (" gateway:read" if role == "admin" else ""),
+            # Tokens are only issued after the email is verified. Ms-club matches it against
+            # the emails a club principal assigned as administrators.
+            **({"email": email.strip().lower()} if email else {}),
         },
         settings.jwt_secret,
         algorithm=JWT_ALGORITHM,
