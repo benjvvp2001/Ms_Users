@@ -5,7 +5,7 @@ from uuid import UUID
 
 from fastapi import BackgroundTasks, HTTPException, status
 
-from app.core.config import get_email_settings
+from app.core.config import get_email_settings, get_settings
 from app.core.config import EmailSettings, LocationSettings, get_location_settings
 from app.core.security import (
     create_access_token,
@@ -82,6 +82,9 @@ INVALID_VERIFICATION_CODE = "invalid or expired verification code"
 EMAIL_NOT_VERIFIED = "email not verified"
 
 
+# Rol de las cuentas de club (se elige "club" al registrarse); el resto usa "player".
+CLUB_ROLE = "club_admin"
+
 class UserService:
     """Business logic for the users domain: registration, profile, preferences,
     roles, consents, exports and account deletion.
@@ -105,10 +108,12 @@ class UserService:
         self,
         payload: RegisterRequest,
         background_tasks: BackgroundTasks,
-        role: str = "player",
+        role: str | None = None,
     ) -> RegisterResponse:
         """Create the account inactive and email it a code; it gets a token
         only after confirm_email_verification. Club sign-up passes club_admin."""
+        if role is None:
+            role = CLUB_ROLE if payload.tipo == "club" else "player"
         sender = self._require_email_sender()
         settings = get_email_settings()
         code = generate_one_time_code()
@@ -149,7 +154,7 @@ class UserService:
 
         self._repository.record_audit(
             user_id=user.id,
-            action="register" if role == "player" else "register_club",
+            action="register_club" if role == CLUB_ROLE else "register",
             resource="users",
             result="success",
         )
@@ -743,10 +748,14 @@ class UserService:
 
     def _issue_token(self, user: StoredUser) -> TokenResponse:
         token, expires_in_seconds = create_access_token(user.id, user.role)
+        # El rol decide el frontend: las cuentas de club van al sitio web, el resto a la app.
+        es_club = user.role == CLUB_ROLE
         return TokenResponse(
             access_token=token,
             expires_in_seconds=expires_in_seconds,
             user=self._as_authenticated_user(user),
+            frontend="web" if es_club else "app",
+            web_url=get_settings().web_url if es_club else None,
         )
 
 

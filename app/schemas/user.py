@@ -86,6 +86,9 @@ class RegisterRequest(APIModel):
         default=None, min_length=NAME_MIN_LENGTH, max_length=NAME_MAX_LENGTH, pattern=NAME_PATTERN
     )
     rut: str | None = Field(default=None, max_length=20)
+    # Lo que el usuario elige al registrarse; el backend lo guarda como rol y de ahí decide,
+    # al iniciar sesión, a qué frontend lo manda.
+    tipo: Literal["usuario", "club"] = "usuario"
 
     @field_validator("email")
     @classmethod
@@ -427,6 +430,9 @@ class TokenResponse(APIModel):
     token_type: Literal["bearer"] = "bearer"
     expires_in_seconds: int
     user: AuthenticatedUser
+    # "app": Frontend-SportMatch-APP; "web": sitio de clubes. Sale del rol de la cuenta.
+    frontend: Literal["app", "web"] = "app"
+    web_url: str | None = None
 
 
 class DataExport(APIModel):
