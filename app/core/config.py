@@ -10,6 +10,7 @@ class Settings:
     jwt_access_token_minutes: int
     jwt_issuer: str
     jwt_audience: str
+    web_url: str | None = None
 
 
 def get_settings() -> Settings:
@@ -34,6 +35,8 @@ def get_settings() -> Settings:
         jwt_access_token_minutes=access_token_minutes,
         jwt_issuer=os.getenv("JWT_ISSUER", "sportmatch-auth"),
         jwt_audience=os.getenv("JWT_AUDIENCE", "sportmatch-mobile"),
+        # Dirección del sitio de clubes (sportmatch-web) a la que se manda a los representantes.
+        web_url=os.getenv("SPORTMATCH_WEB_URL") or None,
     )
 
 
