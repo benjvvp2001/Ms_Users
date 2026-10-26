@@ -66,9 +66,21 @@ def test_who_cannot_be_blocked() -> None:
     assert client.put(f"{USERS}/me/blocks/{uuid4()}").status_code == 401
 
 
+JUSTIFICATION = "Me escribió de madrugada"
+
+
+def club(client: TestClient, nombre: str) -> dict:
+    tokens = register_and_verify(client, {
+        "email": f"{nombre.lower()}@club.example.com", "password": "A-secure-test-password-1",
+        "nombre": nombre, "apellido_paterno": "Soto", "tipo": "club",
+    })
+    assert tokens["user"]["role"] == "club_admin"
+    return {"id": tokens["user"]["user_id"], "headers": {"Authorization": f"Bearer {tokens['access_token']}"}}
+
+
 def report(client: TestClient, who: dict, **changes: str):
     body = {"tipo": "usuario", "objetivo_id": str(uuid4()), "objetivo_nombre": "Beto T.",
-            "motivo": "Spam o publicidad", "detalle": "", **changes}
+            "motivo": "Spam o publicidad", "detalle": JUSTIFICATION, **changes}
     return client.post(f"{USERS}/reports", headers=who["headers"], json=body)
 
 
@@ -89,6 +101,57 @@ def test_reports_are_validated_and_counted_once_per_reason() -> None:
                   objetivo_nombre="Trote nocturno").status_code == 201
     assert report(client, ana, tipo="mensaje", objetivo_id="match-1:42", motivo="Spam o estafa").status_code == 201
     assert client.post(f"{USERS}/reports", json={}).status_code == 401
+
+
+def test_every_report_needs_a_written_justification_between_10_and_300_characters() -> None:
+    client, _ = make_client()
+    ana, beto = athlete(client, "Ana"), athlete(client, "Beto")
+    target = beto["id"]
+    for motivo in ("Spam o publicidad", "Otro"):              # Not only "Otro".
+        assert report(client, ana, objetivo_id=target, motivo=motivo, detalle="").status_code == 422
+        assert report(client, ana, objetivo_id=target, motivo=motivo, detalle="   ").status_code == 422
+        assert report(client, ana, objetivo_id=target, motivo=motivo, detalle="nueve car").status_code == 422
+    body = {"tipo": "usuario", "objetivo_id": target, "objetivo_nombre": "Beto T.", "motivo": "Spam o publicidad"}
+    assert client.post(f"{USERS}/reports", headers=ana["headers"], json=body).status_code == 422  # Missing.
+    assert report(client, ana, objetivo_id=target, detalle="Diez letra").status_code == 201        # Exactly 10.
+    assert report(client, ana, objetivo_id=target, motivo="Lenguaje ofensivo",
+                  detalle="x" * 300).status_code == 201                                            # Exactly 300.
+    assert report(client, ana, objetivo_id=target, motivo="Acoso o trato irrespetuoso",
+                  detalle="x" * 301).status_code == 422
+
+
+def test_clubs_can_report_people_and_the_report_keeps_the_club_role() -> None:
+    client, repository = make_client()
+    rocio, beto = club(client, "Rocio"), athlete(client, "Beto")
+    admin = athlete(client, "Moderadora")
+    repository._users[UUID(admin["id"])] = replace(repository._users[UUID(admin["id"])], role="admin")
+
+    created = report(client, rocio, objetivo_id=beto["id"], motivo="Perfil falso o suplantación",
+                     detalle="Usa fotos de otra persona")
+    assert created.status_code == 201, created.text
+    assert created.json()["reportante"]["user_id"] == rocio["id"]
+    assert created.json()["reportante_rol"] == "club_admin"
+
+    listed = client.get(f"{USERS}/admin/reports", headers=admin["headers"]).json()
+    assert [(r["reportante_rol"], r["reportante"]["user_id"]) for r in listed] == [("club_admin", rocio["id"])]
+    # The reported person has no route to see who reported, and no reporter data in their own profile.
+    assert client.get(f"{USERS}/admin/reports", headers=beto["headers"]).status_code == 403
+    own_profile = client.get(f"{USERS}/{beto['id']}/profile", headers=beto["headers"])
+    assert own_profile.status_code == 200 and rocio["id"] not in own_profile.text
+    assert "reportante" not in own_profile.text
+
+
+def test_the_reporter_role_is_the_one_held_when_reporting() -> None:
+    client, repository = make_client()
+    ana, beto = athlete(client, "Ana"), athlete(client, "Beto")
+    created = report(client, ana, objetivo_id=beto["id"]).json()
+    assert created["reportante_rol"] == "player"
+    # A later role change does not rewrite the report.
+    repository._users[UUID(ana["id"])] = replace(repository._users[UUID(ana["id"])], role="club_admin")
+    admin = athlete(client, "Moderadora")
+    repository._users[UUID(admin["id"])] = replace(repository._users[UUID(admin["id"])], role="admin")
+    listed = client.get(f"{USERS}/admin/reports", headers=admin["headers"]).json()
+    assert [r["reportante_rol"] for r in listed] == ["player"]
 
 
 def test_only_admins_list_and_review_reports() -> None:

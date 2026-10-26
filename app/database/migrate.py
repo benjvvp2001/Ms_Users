@@ -20,6 +20,7 @@ def main() -> None:
         migrations.append("006_reports_blocks.sql")
         migrations.append("007_chat_mutes.sql")
         migrations.append("008_current_location.sql")
+        migrations.append("009_reporte_rol.sql")
         for name in migrations:
             conn.execute((directory / name).read_text(encoding="utf-8"))
             print(f"Applied {name}")

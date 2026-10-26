@@ -368,7 +368,7 @@ class MockUserRepository:
             rows = [(blocked, at) for (blocker, blocked), at in self._blocks.items() if blocker == blocker_id]
         return sorted(rows, key=lambda row: row[1], reverse=True)
 
-    def create_report(self, reporter_id: UUID, report: ReportCreate) -> ReportRecord | None:
+    def create_report(self, reporter_id: UUID, report: ReportCreate, reporter_role: str) -> ReportRecord | None:
         with self._lock:
             if any((r.reportante_id, r.tipo, r.objetivo_id, r.motivo)
                    == (reporter_id, report.tipo, report.objetivo_id, report.motivo)
@@ -378,6 +378,7 @@ class MockUserRepository:
                 id=uuid4(), reportante_id=reporter_id, tipo=report.tipo, objetivo_id=report.objetivo_id,
                 objetivo_nombre=report.objetivo_nombre, motivo=report.motivo, detalle=report.detalle,
                 estado="pendiente", fecha_creacion=datetime.now(timezone.utc), fecha_revision=None,
+                reportante_rol=reporter_role,
             )
             self._reports[record.id] = record
             return record

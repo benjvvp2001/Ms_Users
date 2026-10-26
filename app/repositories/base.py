@@ -103,6 +103,7 @@ class ReportRecord:
     estado: str
     fecha_creacion: datetime
     fecha_revision: datetime | None
+    reportante_rol: str | None = None
 
 
 class UserRepository(Protocol):
@@ -229,8 +230,9 @@ class UserRepository(Protocol):
         """(blocked user, blocked at), newest first."""
         ...
 
-    def create_report(self, reporter_id: UUID, report: ReportCreate) -> ReportRecord | None:
-        """None when this person already sent the same reason about the same target."""
+    def create_report(self, reporter_id: UUID, report: ReportCreate, reporter_role: str) -> ReportRecord | None:
+        """None when this person already sent the same reason about the same target.
+        reporter_role is saved as it was when the report was sent."""
         ...
 
     def list_reports(self, estado: str | None, limit: int) -> list[ReportRecord]:

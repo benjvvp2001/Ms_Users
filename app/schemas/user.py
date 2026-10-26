@@ -309,6 +309,9 @@ REPORT_REASONS: dict[str, tuple[str, ...]] = {
                   "Spam o publicidad", "Otro"),
     "mensaje": ("Acoso o amenazas", "Lenguaje ofensivo", "Contenido inapropiado", "Spam o estafa", "Otro"),
 }
+# Toda denuncia lleva una justificación escrita (tras quitar espacios de los extremos).
+REPORT_DETAIL_MIN_LENGTH = 10
+REPORT_DETAIL_MAX_LENGTH = 300
 
 
 class PublicAthlete(APIModel):
@@ -371,20 +374,26 @@ class ReportCreate(APIModel):
     objetivo_id: str = Field(min_length=1, max_length=120)
     objetivo_nombre: str = Field(min_length=1, max_length=200)
     motivo: str = Field(min_length=1, max_length=60)
-    detalle: str = Field(default="", max_length=300)
+    # Justificación escrita: obligatoria para cualquier motivo (no solo "Otro").
+    detalle: str = Field(max_length=REPORT_DETAIL_MAX_LENGTH)
 
     @model_validator(mode="after")
     def valid_reason(self) -> "ReportCreate":
         if self.motivo not in REPORT_REASONS[self.tipo]:
             raise ValueError("Elige un motivo para el reporte.")
-        if self.motivo == "Otro" and len(self.detalle) < 10:
-            raise ValueError("Cuéntanos qué pasó (al menos 10 caracteres).")
+        if len(self.detalle) < REPORT_DETAIL_MIN_LENGTH:
+            raise ValueError(
+                f"Explica el motivo del reporte (entre {REPORT_DETAIL_MIN_LENGTH} "
+                f"y {REPORT_DETAIL_MAX_LENGTH} caracteres)."
+            )
         return self
 
 
 class ReportRead(ReportCreate):
     id: UUID
     reportante: PublicAthlete | None
+    # Rol de la cuenta que reportó al momento del reporte (p. ej. club_admin o player).
+    reportante_rol: str | None = None
     estado: Literal["pendiente", "revisado", "descartado"]
     fecha_creacion: datetime
     fecha_revision: datetime | None

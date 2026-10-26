@@ -71,3 +71,25 @@ def test_the_email_confirmation_token_also_names_the_frontend(monkeypatch) -> No
     code = client.app.state.email_sender.last_code(ACCOUNT["email"])
     confirmed = client.post(VERIFY_CONFIRM_PATH, json={"email": ACCOUNT["email"], "code": code}).json()
     assert confirmed["frontend"] == "web" and confirmed["web_url"] is None
+
+
+def test_a_club_signs_in_from_the_app_or_the_web_with_the_same_token(monkeypatch) -> None:
+    # El backend solo indica el frontend de destino; no impide usar el token en el otro.
+    monkeypatch.setenv("SPORTMATCH_WEB_URL", "https://clubes.example.com")
+    client, _ = make_client()
+    payload = register_and_verify(client, tipo="club")
+    body = login(client, payload)
+    assert body["frontend"] == "web" and body["web_url"] == "https://clubes.example.com"
+    headers = {"Authorization": f"Bearer {body['access_token']}"}
+    own_profile = client.get(f"/api/v1/users/{body['user']['user_id']}/profile", headers=headers)
+    assert own_profile.status_code == 200
+
+
+def test_a_player_gets_the_app_and_no_web_address(monkeypatch) -> None:
+    monkeypatch.setenv("SPORTMATCH_WEB_URL", "https://clubes.example.com")
+    client, _ = make_client()
+    payload = register_and_verify(client, tipo="usuario")
+    body = login(client, payload)
+    assert body["frontend"] == "app" and body["web_url"] is None
+    headers = {"Authorization": f"Bearer {body['access_token']}"}
+    assert client.get(f"/api/v1/users/{body['user']['user_id']}/profile", headers=headers).status_code == 200
