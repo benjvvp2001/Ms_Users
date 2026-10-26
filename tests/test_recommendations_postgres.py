@@ -29,7 +29,7 @@ def directory():
             setup.execute(sql.SQL('SET search_path TO {}').format(sql.Identifier(schema)))
             migrations = Path(__file__).parents[1] / 'db/migrations'
             for name in ('001_users_schema.sql', '004_email_verification.sql', '005_profile_goals_zone.sql',
-                         '006_reports_blocks.sql', '008_current_location.sql'):
+                         '006_reports_blocks.sql', '008_current_location.sql', '009_reporte_rol.sql'):
                 setup.execute((migrations / name).read_text())
             pool = ConnectionPool(dsn, kwargs={'options': f'-c search_path={schema}'}, min_size=1, max_size=2)
             pool.wait()
@@ -109,10 +109,10 @@ def test_real_sql_hides_blocked_people_both_ways_and_stores_reports(directory):
     repo.unblock_user(me, blocked)
     assert search(me) == {blocked, other}
 
-    body = ReportCreate(tipo='usuario', objetivo_id=str(blocked), objetivo_nombre='Prueba T.', motivo='Spam o publicidad')
-    created = repo.create_report(me, body)
+    body = ReportCreate(tipo='usuario', objetivo_id=str(blocked), objetivo_nombre='Prueba T.', motivo='Spam o publicidad', detalle='Me escribió de madrugada')
+    created = repo.create_report(me, body, 'player')
     assert created.estado == 'pendiente'
-    assert repo.create_report(me, body) is None
+    assert repo.create_report(me, body, 'player') is None
     assert [r.id for r in repo.list_reports('pendiente', 10)] == [created.id]
     assert repo.review_report(created.id, 'descartado', other).estado == 'descartado'
     assert repo.list_reports('pendiente', 10) == []

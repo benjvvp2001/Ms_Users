@@ -544,17 +544,18 @@ class PostgresUserRepository:
             ).fetchall()
         return [(row[0], row[1]) for row in rows]
 
-    def create_report(self, reporter_id: UUID, report: ReportCreate) -> ReportRecord | None:
+    def create_report(self, reporter_id: UUID, report: ReportCreate, reporter_role: str) -> ReportRecord | None:
         with self._pool.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(
                     """
-                    INSERT INTO reporte (id, reportante_id, tipo, objetivo_id, objetivo_nombre, motivo, detalle)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO reporte (id, reportante_id, reportante_rol, tipo, objetivo_id, objetivo_nombre,
+                                         motivo, detalle)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (reportante_id, tipo, objetivo_id, motivo) DO NOTHING
                     RETURNING *
                     """,
-                    (uuid4(), reporter_id, report.tipo, report.objetivo_id, report.objetivo_nombre,
+                    (uuid4(), reporter_id, reporter_role, report.tipo, report.objetivo_id, report.objetivo_nombre,
                      report.motivo, report.detalle),
                 )
                 row = cur.fetchone()
@@ -587,6 +588,7 @@ class PostgresUserRepository:
             objetivo_id=row["objetivo_id"], objetivo_nombre=row["objetivo_nombre"],
             motivo=row["motivo"], detalle=row["detalle"], estado=row["estado"],
             fecha_creacion=row["fecha_creacion"], fecha_revision=row["fecha_revision"],
+            reportante_rol=row["reportante_rol"],
         )
 
     def create_password_reset(

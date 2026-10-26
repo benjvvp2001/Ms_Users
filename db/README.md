@@ -8,6 +8,8 @@ El rol existente de `rol.id` es integer y se conserva; el repositorio también f
 
 `006_reports_blocks.sql` crea `bloqueo_usuario` y `reporte`, y `007_chat_mutes.sql` crea `silencio_usuario`; `008_current_location.sql` crea `ubicacion_actual` (última posición de cada deportista, una fila por persona, para recomendar personas cercanas) (HU-51: personas silenciadas por cada usuario, con la misma forma que los bloqueos; ambas tablas se borran en cascada con la cuenta). Las HU-42 y HU-51 reutilizan `bloqueo_usuario`; no existe una tabla `user_blocks` aparte.
 
+`009_reporte_rol.sql` añade `reporte.reportante_rol` (rol de la cuenta que reportó, p. ej. `club_admin` o `player`, guardado al momento del reporte). Es nullable: los reportes anteriores no se modifican.
+
 Las instrucciones siguientes documentan el diseño original para una instalación nueva; para esta integración sigue [la guía del gateway](../../Ms_gateway/README.md).
 
 Este esquema es el que efectivamente pertenece al microservicio de usuarios,

@@ -522,9 +522,11 @@ class UserService:
         return self.chat_preferences(current_user)
 
     def report(self, current_user: StoredUser, payload: ReportCreate) -> ReportRead:
+        """Any signed-in account can report (deportistas y clubes). The report keeps the role the
+        reporter had at that moment; the reported person never sees who reported."""
         if payload.tipo == "usuario" and payload.objetivo_id == str(current_user.id):
             raise HTTPException(422, "No puedes reportarte a ti mismo.")
-        record = self._repository.create_report(current_user.id, payload)
+        record = self._repository.create_report(current_user.id, payload, current_user.role)
         if record is None:
             raise HTTPException(409, "Ya enviaste este reporte. Lo estamos revisando.")
         return self._as_report(record)
@@ -557,6 +559,7 @@ class UserService:
             id=record.id, tipo=record.tipo, objetivo_id=record.objetivo_id,
             objetivo_nombre=record.objetivo_nombre, motivo=record.motivo, detalle=record.detalle,
             reportante=None if reporter is None else self._as_public(reporter),
+            reportante_rol=record.reportante_rol,
             estado=record.estado, fecha_creacion=record.fecha_creacion, fecha_revision=record.fecha_revision,
         )
 
