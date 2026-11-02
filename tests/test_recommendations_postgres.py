@@ -30,7 +30,7 @@ def directory():
             migrations = Path(__file__).parents[1] / 'db/migrations'
             for name in ('001_users_schema.sql', '004_email_verification.sql', '005_profile_goals_zone.sql',
                          '006_reports_blocks.sql', '008_current_location.sql', '009_reporte_rol.sql',
-                         '010_audit_admin.sql'):
+                         '010_audit_admin.sql', '011_reporte_escalado.sql', '014_reporte_revision_autor.sql'):
                 setup.execute((migrations / name).read_text())
             pool = ConnectionPool(dsn, kwargs={'options': f'-c search_path={schema}'}, min_size=1, max_size=2)
             pool.wait()

@@ -197,6 +197,13 @@ class ReportRecord:
     fecha_creacion: datetime
     fecha_revision: datetime | None
     reportante_rol: str | None = None
+    # Quien lo resolvio y la nota que escribio (HU-47). Quien lo hizo y cuando se resolvio van en las mismas columnas
+    # que usa la fila de auditoria del evento.
+    revisado_por: UUID | None = None
+    motivo_revision: str | None = None
+    # Reportes de una actividad o un mensaje: la cuenta que hizo ese contenido, si ya se averiguo, y cuando se pregunto.
+    autor_id: UUID | None = None
+    autor_consultado_en: datetime | None = None
 
 
 class UserRepository(Protocol):
@@ -332,12 +339,25 @@ class UserRepository(Protocol):
         """Newest first; all states when estado is None."""
         ...
 
+    def set_report_author(
+        self, report_id: UUID, autor_id: UUID | None, consulted_at: datetime
+    ) -> ReportRecord | None:
+        """Remembers who made the reported content (an activity or a message) and when it was asked. autor_id None
+        = the origin service said there is no such content: the question is not repeated for a while. Only for
+        reports of tipo actividad or mensaje. None when the report does not exist."""
+        ...
+
+    def list_reports_without_author(self, estado: str | None, limit: int, offset: int = 0) -> list[ReportRecord]:
+        """Reports of tipo actividad or mensaje whose author is not known yet (same order as list_reports)."""
+        ...
+
     def review_report(
         self, report_id: UUID, estado: str, reviewer_id: UUID, motivo: str | None = None
     ) -> ReportRecord | None:
-        """Moves the report to `estado` and writes its audit row in the same transaction: if the audit cannot
+        """Moves the report to `estado`, keeping who decided it, when and the note, and writes its audit row in the
+        same transaction with those same data: if the audit cannot
         be written the change is not saved either (DependencyUnavailableError). motivo defaults to the
-        report's own reason. Same state as now: returns it untouched and audits nothing. A state REPORT_TRANSITIONS
+        report's own reason in the audit row (the note itself is kept only if the administrator wrote one). Same state as now: returns it untouched and audits nothing. A state REPORT_TRANSITIONS
         does not allow raises InvalidReportTransitionError. None when the report does not exist."""
         ...
 

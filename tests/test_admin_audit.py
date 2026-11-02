@@ -327,3 +327,39 @@ def test_a_too_short_service_secret_never_authenticates_and_is_a_503(monkeypatch
     response = client.post(INTERNAL, json=internal_body(admin), headers={"X-Internal-Service-Token": "short"})
     assert response.status_code == 503
     assert items(client, admin) == []
+
+
+# -- HU-56 (panel web): reactivar un plan y nombres de los suscriptores ---------------------------
+
+NAMES = "/internal/v1/accounts/names"
+
+
+def test_a_plan_reactivation_is_in_the_catalog_and_shows_up_in_the_audit(monkeypatch) -> None:
+    client, _, admin, _ = setup()
+    monkeypatch.setenv("INTERNAL_SERVICE_TOKEN", SERVICE_TOKEN)
+    body = {**internal_body(admin), "action": "PLAN_REACTIVATED", "motivo": "Vuelve la oferta",
+            "metadata": {"campos": "is_active"}}
+    assert client.post(INTERNAL, json=body, headers={"X-Internal-Service-Token": SERVICE_TOKEN}).status_code == 204
+    [event] = items(client, admin, "?accion=PLAN_REACTIVATED")
+    assert (event["accion"], event["recurso_tipo"], event["motivo"]) == ("PLAN_REACTIVATED", "plan", "Vuelve la oferta")
+
+
+def test_the_internal_names_endpoint_needs_the_service_secret_and_gives_only_short_names(monkeypatch) -> None:
+    client, _, admin, ana = setup()
+    monkeypatch.setenv("INTERNAL_SERVICE_TOKEN", SERVICE_TOKEN)
+    ids = [ana["id"], str(uuid4())]
+    assert client.post(NAMES, json={"ids": ids}).status_code == 401
+    assert client.post(NAMES, json={"ids": ids}, headers=admin["headers"]).status_code == 401      # a user token is not a service secret
+    headers = {"X-Internal-Service-Token": SERVICE_TOKEN}
+    response = client.post(NAMES, json={"ids": ids + ids}, headers=headers)
+    assert response.status_code == 200, response.text
+    names = response.json()["names"]
+    assert list(names) == [ana["id"]]                      # the unknown id is left out
+    assert names[ana["id"]].startswith("Ana ") and names[ana["id"]].endswith(".") and len(names[ana["id"]]) <= 12
+    assert "@" not in response.text
+    assert client.post(NAMES, json={"ids": []}, headers=headers).json() == {"names": {}}
+    assert client.post(NAMES, json={"ids": [str(uuid4()) for _ in range(101)]}, headers=headers).status_code == 422
+    assert client.post(NAMES, json={"ids": ["no-es-uuid"]}, headers=headers).status_code == 422
+    assert client.post(NAMES, json={"ids": [], "otro": 1}, headers=headers).status_code == 422
+    monkeypatch.delenv("INTERNAL_SERVICE_TOKEN")
+    assert client.post(NAMES, json={"ids": ids}, headers=headers).status_code == 503

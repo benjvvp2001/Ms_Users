@@ -12,6 +12,8 @@ from app.core.config import get_internal_service_token
 from app.repositories.base import UserRepository
 from uuid import UUID
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from app.api.dependencies import get_sanction_service
 from app.schemas.audit import AdminAuditEntry
 from app.schemas.sanction import AccountStatus
@@ -58,3 +60,27 @@ def account_status(user_id: UUID, service: SanctionService = Depends(get_sanctio
     """HU-45: the gateway asks, per account, whether it is suspended. Only the sanction's type, reason and end
     date: nothing about who reported or who sanctioned."""
     return service.account_status(user_id)
+
+
+class AccountNamesRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ids: list[UUID] = Field(max_length=100)
+
+
+class AccountNames(BaseModel):
+    names: dict[UUID, str]
+
+
+@accounts_router.post("/names", response_model=AccountNames, dependencies=[Depends(require_internal_service)])
+def account_names(
+    payload: AccountNamesRequest, repository: UserRepository = Depends(get_repository)
+) -> AccountNames:
+    """HU-56: the short name ("Ana T.") of each account, so the administrator's plan screen can say who a
+    subscription belongs to. Only the first name and the initial of the surname: never an e-mail or a RUT.
+    Unknown accounts are left out."""
+    names: dict[UUID, str] = {}
+    for user_id in dict.fromkeys(payload.ids):
+        user = repository.get_user(user_id)
+        if user is not None and user.profile is not None:
+            names[user_id] = f"{user.profile.nombre} {user.profile.apellido_paterno[:1].upper()}.".strip()
+    return AccountNames(names=names)

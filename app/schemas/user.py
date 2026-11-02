@@ -404,9 +404,16 @@ class ReportRead(ReportCreate):
     reportante_rol: str | None = None
     estado: Literal["pendiente", "revisado", "descartado", "escalado"]
     # Solo para reportes de personas; objetivo_nombre lo escribe quien reporta, este viene de la cuenta.
+    # En un reporte de una persona, la reportada; en uno de una actividad o un mensaje, la cuenta que hizo ese contenido.
     reportado: ReportedPerson | None = None
+    # Solo actividad y mensaje: true si no se pudo averiguar la cuenta que hizo el contenido (el servicio de origen no
+    # respondio o el contenido ya no existe). Entonces `reportado` va vacio y no se inventa nada.
+    autor_no_disponible: bool = False
     fecha_creacion: datetime
     fecha_revision: datetime | None
+    # Quien lo resolvio (administrador, nombre corto) y la nota que escribio; vacios mientras esta pendiente.
+    revisado_por: ReportedPerson | None = None
+    motivo_revision: str | None = None
 
 
 class ReportListQuery(APIModel):

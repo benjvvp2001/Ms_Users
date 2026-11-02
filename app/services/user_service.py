@@ -6,6 +6,7 @@ from uuid import UUID
 from fastapi import BackgroundTasks, HTTPException, status
 
 from app.core.config import get_email_settings, get_settings
+from app.services.content_authors import ContentAuthors
 from app.core.config import EmailSettings, LocationSettings, get_location_settings
 from app.core.security import (
     create_access_token,
@@ -87,6 +88,10 @@ EMAIL_NOT_VERIFIED = "email not verified"
 
 # Rol de las cuentas de club (se elige "club" al registrarse); el resto usa "player".
 CLUB_ROLE = "club_admin"
+# HU-47: quién hizo una actividad o un mensaje reportado se pregunta a su servicio de origen; a lo sumo tantas veces por
+# petición de listado, y un contenido que no existe no se vuelve a preguntar en este tiempo.
+AUTHOR_LOOKUPS_PER_REQUEST = 20
+AUTHOR_RETRY = timedelta(hours=1)
 
 class UserService:
     """Business logic for the users domain: registration, profile, preferences,
@@ -99,11 +104,12 @@ class UserService:
 
     def __init__(
         self, repository: UserRepository, email_sender: EmailSender | None = None,
-        location: LocationSettings | None = None,
+        location: LocationSettings | None = None, content_authors: ContentAuthors | None = None,
     ) -> None:
         self._repository = repository
         self._email_sender = email_sender
         self._location = location or get_location_settings()
+        self._content_authors = content_authors
 
     # -- auth -----------------------------------------------------------
 
@@ -537,6 +543,9 @@ class UserService:
         record = self._repository.create_report(current_user.id, payload, current_user.role)
         if record is None:
             raise HTTPException(409, "Ya enviaste este reporte. Lo estamos revisando.")
+        # Who made the content is asked now, while it surely exists; if the origin service does not answer it is
+        # asked again when an administrator lists the reports.
+        record = self._find_author(record) or record
         return self._as_report(record)
 
     def list_reports(
@@ -545,6 +554,7 @@ class UserService:
         """Newest first. estado None lists every state; pagina starts at 1."""
         self._require_admin(current_user)
         records = self._repository.list_reports(estado, limit, (pagina - 1) * limit)
+        records = self._find_missing_authors(records)
         return [self._as_report(record) for record in records]
 
     def review_report(
@@ -564,24 +574,67 @@ class UserService:
         if current_user.role != "admin":
             raise HTTPException(403, "Solo un administrador puede revisar reportes.")
 
+    # -- who made the reported content (activity or message) ----------------------------------------------
+
+    def _find_author(self, record: ReportRecord) -> ReportRecord | None:
+        """Asks the service that owns the content and remembers the answer. A missing content is remembered too
+        (not asked again for AUTHOR_RETRY); an unanswered question is not remembered and nothing is invented."""
+        if record.tipo not in ("actividad", "mensaje") or self._content_authors is None:
+            return None
+        result = self._content_authors.lookup(record.tipo, record.objetivo_id)
+        if result.status == "unavailable":
+            return None
+        return self._repository.set_report_author(
+            record.id, result.user_id if result.status == "found" else None, datetime.now(timezone.utc))
+
+    def _find_missing_authors(self, records: list[ReportRecord]) -> list[ReportRecord]:
+        """Fills in the author of the reports of this page that still have none, a few per request. If the first
+        question finds the origin service down, the rest are not even tried. The reports of an old QA database
+        (content that does not exist) are asked once and then left alone for AUTHOR_RETRY."""
+        if self._content_authors is None:
+            return records
+        now = datetime.now(timezone.utc)
+        asked = 0
+        out = list(records)
+        for index, record in enumerate(records):
+            if record.tipo not in ("actividad", "mensaje") or record.autor_id is not None:
+                continue
+            if record.autor_consultado_en is not None and now - record.autor_consultado_en < AUTHOR_RETRY:
+                continue
+            if asked >= AUTHOR_LOOKUPS_PER_REQUEST:
+                break
+            asked += 1
+            found = self._find_author(record)
+            if found is None:
+                break    # the origin service is not answering: do not wait for it once per report
+            out[index] = found
+        return out
+
     def _as_public(self, user: StoredUser) -> PublicAthlete:
         return PublicAthlete(user_id=user.id, nombre=user.profile.nombre,
                              apellido_inicial=f"{user.profile.apellido_paterno[:1].upper()}.",
                              foto_perfil=user.profile.foto_perfil)
 
+    def _person(self, user_id: UUID | None) -> ReportedPerson | None:
+        user = None if user_id is None else self._repository.get_user(user_id)
+        if user is None:
+            return None
+        return ReportedPerson(user_id=user.id, nombre=user.profile.nombre,
+                              apellido_inicial=f"{user.profile.apellido_paterno[:1].upper()}.")
+
     def _as_report(self, record: ReportRecord) -> ReportRead:
         reporter = None if record.reportante_id is None else self._repository.get_user(record.reportante_id)
-        reported = None
         if record.tipo == "usuario":
             try:
-                target = self._repository.get_user(UUID(record.objetivo_id))
+                reported = self._person(UUID(record.objetivo_id))
             except ValueError:
-                target = None
-            if target is not None:
-                reported = ReportedPerson(user_id=target.id, nombre=target.profile.nombre,
-                                          apellido_inicial=f"{target.profile.apellido_paterno[:1].upper()}.")
+                reported = None
+        else:
+            reported = self._person(record.autor_id)
         return ReportRead(
             reportado=reported,
+            autor_no_disponible=record.tipo != "usuario" and reported is None,
+            revisado_por=self._person(record.revisado_por), motivo_revision=record.motivo_revision,
             id=record.id, tipo=record.tipo, objetivo_id=record.objetivo_id,
             objetivo_nombre=record.objetivo_nombre, motivo=record.motivo, detalle=record.detalle,
             reportante=None if reporter is None else ReportedPerson(

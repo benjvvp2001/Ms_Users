@@ -618,6 +618,31 @@ class PostgresUserRepository:
                 )
                 return [self._as_report(row) for row in cur.fetchall()]
 
+    def list_reports_without_author(self, estado: str | None, limit: int, offset: int = 0) -> list[ReportRecord]:
+        with self._pool.connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    "SELECT * FROM reporte WHERE tipo IN ('actividad', 'mensaje') AND autor_id IS NULL "
+                    "AND (%(estado)s::text IS NULL OR estado = %(estado)s) "
+                    "ORDER BY fecha_creacion DESC, id LIMIT %(limit)s OFFSET %(offset)s",
+                    {"estado": estado, "limit": limit, "offset": offset},
+                )
+                return [self._as_report(row) for row in cur.fetchall()]
+
+    def set_report_author(
+        self, report_id: UUID, autor_id: UUID | None, consulted_at: datetime
+    ) -> ReportRecord | None:
+        with self._pool.connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                # The account may have been deleted meanwhile: then the author stays unknown, never a dangling id.
+                cur.execute(
+                    "UPDATE reporte SET autor_id = (SELECT id FROM usuario WHERE id = %s), autor_consultado_en = %s "
+                    "WHERE id = %s AND tipo IN ('actividad', 'mensaje') RETURNING *",
+                    (autor_id, consulted_at, report_id),
+                )
+                row = cur.fetchone()
+        return None if row is None else self._as_report(row)
+
     def review_report(
         self, report_id: UUID, estado: str, reviewer_id: UUID, motivo: str | None = None
     ) -> ReportRecord | None:
@@ -634,9 +659,9 @@ class PostgresUserRepository:
                     if estado not in REPORT_TRANSITIONS.get(current["estado"], ()):
                         raise InvalidReportTransitionError(current["estado"])
                     cur.execute(
-                        "UPDATE reporte SET estado = %s, revisado_por = %s, fecha_revision = CURRENT_TIMESTAMP "
-                        "WHERE id = %s RETURNING *",
-                        (estado, reviewer_id, report_id),
+                        "UPDATE reporte SET estado = %s, revisado_por = %s, fecha_revision = CURRENT_TIMESTAMP, "
+                        "motivo_revision = %s WHERE id = %s RETURNING *",
+                        (estado, reviewer_id, motivo, report_id),
                     )
                     row = cur.fetchone()
                 # Same transaction: if the audit row fails, the change is rolled back.
@@ -691,13 +716,14 @@ class PostgresUserRepository:
                     if cur.fetchone() is not None:
                         raise SanctionConflictError(user_id)
                     if report_id is not None:
-                        cur.execute("SELECT tipo, objetivo_id, estado FROM reporte WHERE id = %s FOR SHARE", (report_id,))
+                        cur.execute("SELECT tipo, objetivo_id, estado, autor_id FROM reporte WHERE id = %s FOR SHARE", (report_id,))
                         report = cur.fetchone()
                         if report is None:
                             raise SanctionReportError("not_found")
                         if report["estado"] != "escalado":
                             raise SanctionReportError("not_escalated")
-                        if report["tipo"] != "usuario" or report["objetivo_id"] != str(user_id):
+                        # A report of a person names that person; one of an activity or a message, the account that made it.
+                        if (report["objetivo_id"] != str(user_id)) if report["tipo"] == "usuario" else (report["autor_id"] != user_id):
                             raise SanctionReportError("other_target")
                     cur.execute(
                         "INSERT INTO sancion (id, usuario_id, tipo, motivo, inicio, fin, admin_id, reporte_id) "
@@ -868,7 +894,9 @@ class PostgresUserRepository:
             objetivo_id=row["objetivo_id"], objetivo_nombre=row["objetivo_nombre"],
             motivo=row["motivo"], detalle=row["detalle"], estado=row["estado"],
             fecha_creacion=row["fecha_creacion"], fecha_revision=row["fecha_revision"],
-            reportante_rol=row["reportante_rol"],
+            reportante_rol=row["reportante_rol"], revisado_por=row.get("revisado_por"),
+            motivo_revision=row.get("motivo_revision"), autor_id=row.get("autor_id"),
+            autor_consultado_en=row.get("autor_consultado_en"),
         )
 
     def create_password_reset(
