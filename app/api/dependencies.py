@@ -5,6 +5,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.security import get_token_subject
 from app.repositories.base import StoredUser, UserRepository
+from app.services.audit_service import AuditService
+from app.services.sanction_service import SanctionService, ensure_not_suspended
 from app.services.email_sender import EmailSender, get_email_sender
 from app.services.user_service import UserService
 
@@ -27,6 +29,17 @@ def get_user_service(
     return UserService(repository, email_sender)
 
 
+def get_audit_service(repository: UserRepository = Depends(get_repository)) -> AuditService:
+    return AuditService(repository)
+
+
+def get_sanction_service(
+    repository: UserRepository = Depends(get_repository),
+    email_sender: EmailSender = Depends(get_mailer),
+) -> SanctionService:
+    return SanctionService(repository, email_sender)
+
+
 def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     repository: UserRepository = Depends(get_repository),
@@ -44,4 +57,6 @@ def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="authentication required",
         )
+    if user.role != "admin":  # HU-45: a sanction applies to a token that already exists, at once
+        ensure_not_suspended(repository, user.id)
     return user

@@ -5,8 +5,10 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, Response, status
 
-from app.api.dependencies import get_current_user, get_user_service
+from app.api.dependencies import get_audit_service, get_current_user, get_sanction_service, get_user_service
 from app.repositories.base import StoredUser
+from app.schemas.audit import AuditPage, AuditQuery
+from app.schemas.sanction import SanctionCreate, SanctionLift, SanctionListQuery, SanctionRead
 from app.schemas.user import (
     BlockCheck,
     BlockCreate,
@@ -31,12 +33,15 @@ from app.schemas.user import (
     RegisterResponse,
     ReportCreate,
     ReportRead,
+    ReportListQuery,
     ReportReview,
     RoleRead,
     SuggestedUser,
     SuggestionFilters,
     TokenResponse,
 )
+from app.services.audit_service import AuditService
+from app.services.sanction_service import SanctionService
 from app.services.user_service import UserService
 
 router = APIRouter(prefix="/api/v1/users", tags=["users"])
@@ -291,14 +296,18 @@ def create_report(
     return service.report(current_user, payload)
 
 
-@router.get("/admin/reports", response_model=list[ReportRead], summary="Reportes para moderar (solo admin)")
+@router.get(
+    "/admin/reports", response_model=list[ReportRead], summary="Reportes para moderar (solo admin)",
+    description="Más recientes primero. estado: pendiente (por defecto), revisado, descartado, escalado o todos. "
+    "Paginado con pagina (desde 1) y limit (máximo 100).",
+)
 def list_reports(
-    estado: Literal["pendiente", "revisado", "descartado"] | None = None,
-    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    query: Annotated[ReportListQuery, Query()],
     current_user: StoredUser = Depends(get_current_user),
     service: UserService = Depends(get_user_service),
 ) -> list[ReportRead]:
-    return service.list_reports(current_user, estado, limit)
+    estado = None if query.estado == "todos" else query.estado
+    return service.list_reports(current_user, estado, query.limit, query.pagina)
 
 
 @router.patch("/admin/reports/{report_id}", response_model=ReportRead)
@@ -308,7 +317,67 @@ def review_report(
     current_user: StoredUser = Depends(get_current_user),
     service: UserService = Depends(get_user_service),
 ) -> ReportRead:
-    return service.review_report(current_user, report_id, payload.estado)
+    return service.review_report(current_user, report_id, payload.estado, payload.motivo)
+
+
+@router.post(
+    "/admin/sanctions", response_model=SanctionRead, status_code=status.HTTP_201_CREATED,
+    summary="Suspender o sancionar una cuenta (solo admin)",
+    description="tipo temporal (dias de 1 a 365) o permanente. reporte_id es opcional; si se envía debe ser un "
+    "reporte escalado de esa misma cuenta. Avisa a la persona (motivo y duración) y le restringe el acceso al instante.",
+)
+def apply_sanction(
+    payload: SanctionCreate,
+    current_user: StoredUser = Depends(get_current_user),
+    service: SanctionService = Depends(get_sanction_service),
+) -> SanctionRead:
+    return service.apply(current_user, payload)
+
+
+@router.get("/admin/sanctions", response_model=list[SanctionRead], summary="Sanciones (solo admin)",
+            description="Más recientes primero. Filtros: estado (activa, levantada, vencida), usuario_id; "
+            "pagina (desde 1) y limit (máximo 100).")
+def list_sanctions(
+    query: Annotated[SanctionListQuery, Query()],
+    current_user: StoredUser = Depends(get_current_user),
+    service: SanctionService = Depends(get_sanction_service),
+) -> list[SanctionRead]:
+    return service.list(current_user, query)
+
+
+@router.get("/admin/sanctions/{sanction_id}", response_model=SanctionRead, summary="Una sanción (solo admin)")
+def get_sanction(
+    sanction_id: UUID,
+    current_user: StoredUser = Depends(get_current_user),
+    service: SanctionService = Depends(get_sanction_service),
+) -> SanctionRead:
+    return service.get(current_user, sanction_id)
+
+
+@router.post("/admin/sanctions/{sanction_id}/lift", response_model=SanctionRead,
+             summary="Levantar una sanción (solo admin)",
+             description="Idempotente: levantar una ya levantada o ya vencida devuelve la sanción sin cambios.")
+def lift_sanction(
+    sanction_id: UUID,
+    payload: SanctionLift,
+    current_user: StoredUser = Depends(get_current_user),
+    service: SanctionService = Depends(get_sanction_service),
+) -> SanctionRead:
+    return service.lift(current_user, sanction_id, payload)
+
+
+@router.get(
+    "/admin/audit-events", response_model=AuditPage,
+    summary="Historial de acciones administrativas (solo admin, solo lectura)",
+    description="Más reciente primero. Filtros: desde, hasta, admin_id, accion, recurso_tipo, recurso_id, "
+    "resultado. Paginado: pagina y por_pagina (máximo 100). No hay endpoints para editar ni borrar.",
+)
+def list_audit_events(
+    query: Annotated[AuditQuery, Query()],
+    current_user: StoredUser = Depends(get_current_user),
+    service: AuditService = Depends(get_audit_service),
+) -> AuditPage:
+    return service.list_events(current_user, query)
 
 
 @router.get("/{user_id}/profile", response_model=ProfileRead)

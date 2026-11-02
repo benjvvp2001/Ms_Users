@@ -1,16 +1,27 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from psycopg.types.json import Jsonb
 from datetime import datetime
 from uuid import UUID, uuid4
 
 import psycopg
+from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 from app.repositories.base import (
     ATHLETE_ROLES,
+    REPORT_TRANSITIONS,
+    InvalidReportTransitionError,
+    SanctionConflictError,
+    SanctionRecord,
+    SanctionReportError,
+    SanctionTargetNotFoundError,
+    AuditRecord,
+    DependencyUnavailableError,
+    display_name,
     EmailVerificationRecord,
     LocationRecord,
     NewEmailVerification,
@@ -18,6 +29,13 @@ from app.repositories.base import (
     ReportRecord,
     StoredUser,
     SuggestionCandidate,
+)
+from app.schemas.audit import (
+    LEGACY_ACTIONS,
+    AdminAuditEntry,
+    AuditAction,
+    AuditQuery,
+    AuditResourceType,
 )
 from app.schemas.user import (
     AvailabilityWindow,
@@ -32,14 +50,43 @@ from app.schemas.user import (
 )
 
 
+def insert_admin_audit(conn: psycopg.Connection, entry: AdminAuditEntry) -> None:
+    """Insert one administrative action using the caller's connection, so it commits or rolls back with
+    whatever the caller is doing. Other repositories (plans, memberships, payments) call it inside their own
+    `with conn.transaction():` right after the change they audit."""
+    conn.execute(
+        """
+        INSERT INTO audit_events (id, actor_user_id, action, resource, result,
+                                  motivo, resource_type, resource_id, metadata)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (uuid4(), entry.actor_user_id, entry.action.value, f"{entry.resource_type.value}/{entry.resource_id}",
+         entry.result, entry.motivo, entry.resource_type.value, entry.resource_id,
+         None if entry.metadata is None else Jsonb(entry.metadata)),
+    )
+
+
+_REPORT_ACTIONS = {"revisado": AuditAction.REPORT_REVIEWED, "descartado": AuditAction.REPORT_DISCARDED,
+                   "escalado": AuditAction.REPORT_ESCALATED}
+_LEGACY_BY_ACTION: dict[str, list[str]] = {}
+for _raw, _action in LEGACY_ACTIONS.items():
+    _LEGACY_BY_ACTION.setdefault(_action.value, []).append(_raw)
+_CATALOG_RAW = [a.value for a in AuditAction] + list(LEGACY_ACTIONS)
+
+
+logger = logging.getLogger(__name__)
+
+
 class PostgresUserRepository:
     """PostgreSQL-backed repository for the sportmach_users schema (rol, usuario,
     preferencia_usuario, disponibilidad, usuario_deporte, consent, audit_events,
     password_reset_token, email_verificacion, preferencia_perfil).
     """
 
-    def __init__(self, pool: ConnectionPool) -> None:
+    def __init__(self, pool: ConnectionPool, push_inbox: str = "notifications.inbox") -> None:
         self._pool = pool
+        # Inbox of the gateway's push / in-app notifications (HU-45 queues sanction notices there when it exists).
+        self._push_inbox = push_inbox
 
     def close(self) -> None:
         self._pool.close()
@@ -561,26 +608,259 @@ class PostgresUserRepository:
                 row = cur.fetchone()
         return None if row is None else self._as_report(row)
 
-    def list_reports(self, estado: str | None, limit: int) -> list[ReportRecord]:
+    def list_reports(self, estado: str | None, limit: int, offset: int = 0) -> list[ReportRecord]:
         with self._pool.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(
                     "SELECT * FROM reporte WHERE %(estado)s::text IS NULL OR estado = %(estado)s "
-                    "ORDER BY fecha_creacion DESC, id LIMIT %(limit)s",
-                    {"estado": estado, "limit": limit},
+                    "ORDER BY fecha_creacion DESC, id LIMIT %(limit)s OFFSET %(offset)s",
+                    {"estado": estado, "limit": limit, "offset": offset},
                 )
                 return [self._as_report(row) for row in cur.fetchall()]
 
-    def review_report(self, report_id: UUID, estado: str, reviewer_id: UUID) -> ReportRecord | None:
-        with self._pool.connection() as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
+    def review_report(
+        self, report_id: UUID, estado: str, reviewer_id: UUID, motivo: str | None = None
+    ) -> ReportRecord | None:
+        try:
+            with self._pool.connection() as conn, conn.transaction():
+                with conn.cursor(row_factory=dict_row) as cur:
+                    # The row lock makes two simultaneous decisions on one report happen one after the other.
+                    cur.execute("SELECT * FROM reporte WHERE id = %s FOR UPDATE", (report_id,))
+                    current = cur.fetchone()
+                    if current is None:
+                        return None
+                    if current["estado"] == estado:
+                        return self._as_report(current)  # Same decision again: no change, no new audit row.
+                    if estado not in REPORT_TRANSITIONS.get(current["estado"], ()):
+                        raise InvalidReportTransitionError(current["estado"])
+                    cur.execute(
+                        "UPDATE reporte SET estado = %s, revisado_por = %s, fecha_revision = CURRENT_TIMESTAMP "
+                        "WHERE id = %s RETURNING *",
+                        (estado, reviewer_id, report_id),
+                    )
+                    row = cur.fetchone()
+                # Same transaction: if the audit row fails, the change is rolled back.
+                insert_admin_audit(conn, AdminAuditEntry(
+                    actor_user_id=reviewer_id, action=_REPORT_ACTIONS[estado],
+                    resource_type=AuditResourceType.REPORT, resource_id=str(report_id),
+                    motivo=motivo or row["motivo"], metadata={"tipo": row["tipo"], "desde": current["estado"]},
+                ))
+        except psycopg.Error as error:
+            raise DependencyUnavailableError("audit or report storage unavailable") from error
+        return self._as_report(row)
+
+    # -- HU-45: sanctions ------------------------------------------------------------------------
+
+    @staticmethod
+    def _as_sanction(row: dict) -> SanctionRecord:
+        return SanctionRecord(
+            id=row["id"], usuario_id=row["usuario_id"], tipo=row["tipo"], motivo=row["motivo"], inicio=row["inicio"],
+            fin=row["fin"], admin_id=row["admin_id"], reporte_id=row["reporte_id"], estado=row["estado"],
+            levantada_por=row["levantada_por"], levantada_en=row["levantada_en"],
+            motivo_levantamiento=row["motivo_levantamiento"], fecha_creacion=row["fecha_creacion"],
+        )
+
+    def get_active_sanction(self, user_id: UUID, now: datetime) -> SanctionRecord | None:
+        try:
+            with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(
-                    "UPDATE reporte SET estado = %s, revisado_por = %s, fecha_revision = CURRENT_TIMESTAMP "
-                    "WHERE id = %s RETURNING *",
-                    (estado, reviewer_id, report_id),
-                )
+                    "SELECT * FROM sancion WHERE usuario_id = %s AND estado = 'activa' "
+                    "AND (fin IS NULL OR fin > %s) LIMIT 1", (user_id, now))
                 row = cur.fetchone()
-        return None if row is None else self._as_report(row)
+        except psycopg.Error as error:
+            raise DependencyUnavailableError("sanction storage unavailable") from error
+        return None if row is None else self._as_sanction(row)
+
+    def apply_sanction(
+        self, *, sanction_id: UUID, user_id: UUID, tipo: str, dias: int | None, motivo: str, admin_id: UUID,
+        report_id: UUID | None, now: datetime, fin: datetime | None,
+    ) -> SanctionRecord:
+        try:
+            with self._pool.connection() as conn, conn.transaction():
+                with conn.cursor(row_factory=dict_row) as cur:
+                    # Locking the account serializes two admins sanctioning it at the same time.
+                    cur.execute("SELECT id FROM usuario WHERE id = %s AND is_active = TRUE FOR UPDATE", (user_id,))
+                    if cur.fetchone() is None:
+                        raise SanctionTargetNotFoundError(user_id)
+                    # A temporal sanction that already ended is closed here, not by a job.
+                    cur.execute(
+                        "UPDATE sancion SET estado = 'levantada', levantada_en = fin, "
+                        "motivo_levantamiento = 'Vencimiento automático' "
+                        "WHERE usuario_id = %s AND estado = 'activa' AND fin IS NOT NULL AND fin <= %s", (user_id, now))
+                    cur.execute("SELECT 1 FROM sancion WHERE usuario_id = %s AND estado = 'activa'", (user_id,))
+                    if cur.fetchone() is not None:
+                        raise SanctionConflictError(user_id)
+                    if report_id is not None:
+                        cur.execute("SELECT tipo, objetivo_id, estado FROM reporte WHERE id = %s FOR SHARE", (report_id,))
+                        report = cur.fetchone()
+                        if report is None:
+                            raise SanctionReportError("not_found")
+                        if report["estado"] != "escalado":
+                            raise SanctionReportError("not_escalated")
+                        if report["tipo"] != "usuario" or report["objetivo_id"] != str(user_id):
+                            raise SanctionReportError("other_target")
+                    cur.execute(
+                        "INSERT INTO sancion (id, usuario_id, tipo, motivo, inicio, fin, admin_id, reporte_id) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                        (sanction_id, user_id, tipo, motivo, now, fin, admin_id, report_id))
+                    row = cur.fetchone()
+                # Same transaction: if the audit row fails, the sanction is not saved.
+                insert_admin_audit(conn, AdminAuditEntry(
+                    actor_user_id=admin_id, action=AuditAction.SANCTION_APPLIED,
+                    resource_type=AuditResourceType.USER, resource_id=str(user_id), motivo=motivo,
+                    metadata={"sancion_id": str(sanction_id), "tipo": tipo, "dias": dias,
+                              "reporte_id": None if report_id is None else str(report_id)},
+                ))
+        except psycopg.errors.UniqueViolation as error:
+            raise SanctionConflictError(user_id) from error
+        except psycopg.Error as error:
+            raise DependencyUnavailableError("sanction or audit storage unavailable") from error
+        return self._as_sanction(row)
+
+    def lift_sanction(
+        self, sanction_id: UUID, admin_id: UUID, motivo: str, now: datetime
+    ) -> tuple[SanctionRecord, bool] | None:
+        try:
+            with self._pool.connection() as conn, conn.transaction():
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute("SELECT * FROM sancion WHERE id = %s FOR UPDATE", (sanction_id,))
+                    current = cur.fetchone()
+                    if current is None:
+                        return None
+                    record = self._as_sanction(current)
+                    if not record.in_force_at(now):  # already lifted, or it ended by itself
+                        return record, False
+                    cur.execute(
+                        "UPDATE sancion SET estado = 'levantada', levantada_por = %s, levantada_en = %s, "
+                        "motivo_levantamiento = %s WHERE id = %s RETURNING *", (admin_id, now, motivo, sanction_id))
+                    row = cur.fetchone()
+                insert_admin_audit(conn, AdminAuditEntry(
+                    actor_user_id=admin_id, action=AuditAction.SANCTION_LIFTED,
+                    resource_type=AuditResourceType.USER, resource_id=str(record.usuario_id), motivo=motivo,
+                    metadata={"sancion_id": str(sanction_id), "tipo": record.tipo},
+                ))
+        except psycopg.Error as error:
+            raise DependencyUnavailableError("sanction or audit storage unavailable") from error
+        return self._as_sanction(row), True
+
+    def get_sanction(self, sanction_id: UUID) -> SanctionRecord | None:
+        try:
+            with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT * FROM sancion WHERE id = %s", (sanction_id,))
+                row = cur.fetchone()
+        except psycopg.Error as error:
+            raise DependencyUnavailableError("sanction storage unavailable") from error
+        return None if row is None else self._as_sanction(row)
+
+    def list_sanctions(
+        self, estado: str | None, user_id: UUID | None, limit: int, offset: int, now: datetime
+    ) -> list[SanctionRecord]:
+        where, params = ["TRUE"], {"now": now, "limit": limit, "offset": offset}
+        if estado == "activa":
+            where.append("estado = 'activa' AND (fin IS NULL OR fin > %(now)s)")
+        elif estado == "vencida":
+            where.append("estado = 'activa' AND fin IS NOT NULL AND fin <= %(now)s")
+        elif estado == "levantada":
+            where.append("estado = 'levantada'")
+        if user_id is not None:
+            where.append("usuario_id = %(user)s")
+            params["user"] = user_id
+        try:
+            with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(f"SELECT * FROM sancion WHERE {' AND '.join(where)} "
+                            "ORDER BY fecha_creacion DESC, id DESC LIMIT %(limit)s OFFSET %(offset)s", params)
+                return [self._as_sanction(row) for row in cur.fetchall()]
+        except psycopg.Error as error:
+            raise DependencyUnavailableError("sanction storage unavailable") from error
+
+    def add_notification(self, user_id: UUID, tipo: str, titulo: str, mensaje: str, data: dict) -> None:
+        try:
+            with self._pool.connection() as conn, conn.transaction():
+                notice_id = uuid4()
+                conn.execute(
+                    "INSERT INTO notificacion (id, usuario_id, tipo, titulo, mensaje, data) VALUES (%s, %s, %s, %s, %s, %s)",
+                    (notice_id, user_id, tipo, titulo, mensaje, Jsonb(data)))
+                # Push / in-app inbox of the gateway (schema created by the gateway). Best effort: if it is
+                # missing or not writable the saved notice above still stands.
+                if conn.execute("SELECT to_regclass(%s)", (self._push_inbox,)).fetchone()[0] is not None:
+                    try:
+                        with conn.transaction():
+                            conn.execute(
+                                sql.SQL("INSERT INTO {} (id, source, source_id, user_id, kind, title, body, data, created_at) "
+                                        "VALUES (%s, 'users', hashtextextended(%s, 0), %s, %s, %s, %s, %s, CURRENT_TIMESTAMP) "
+                                        "ON CONFLICT DO NOTHING").format(sql.Identifier(*self._push_inbox.split("."))),
+                                (notice_id, str(notice_id), user_id, tipo, titulo, mensaje, Jsonb(data)))
+                    except psycopg.Error:
+                        logger.warning("push inbox not available for notice %s", notice_id)
+        except psycopg.Error as error:
+            raise DependencyUnavailableError("notification storage unavailable") from error
+
+    def record_admin_audit(self, entry: AdminAuditEntry) -> None:
+        try:
+            with self._pool.connection() as conn, conn.transaction():
+                insert_admin_audit(conn, entry)
+        except psycopg.Error as error:
+            raise DependencyUnavailableError("audit storage unavailable") from error
+
+    def list_admin_audit(self, query: AuditQuery) -> tuple[list[AuditRecord], int]:
+        # Only administrative actions: the closed catalog plus the report rows written before HU-48.
+        where = ["a.action = ANY(%(catalog)s)"]
+        params: dict = {"catalog": _CATALOG_RAW, "limit": query.por_pagina,
+                        "offset": (query.pagina - 1) * query.por_pagina}
+        if query.desde:
+            where.append("a.fecha >= %(desde)s")
+            params["desde"] = query.desde
+        if query.hasta:
+            where.append("a.fecha <= %(hasta)s")
+            params["hasta"] = query.hasta
+        if query.admin_id:
+            where.append("a.actor_user_id = %(admin)s")
+            params["admin"] = query.admin_id
+        if query.accion:
+            where.append("a.action = ANY(%(accion)s)")
+            params["accion"] = [query.accion.value, *_LEGACY_BY_ACTION.get(query.accion.value, [])]
+        if query.resultado:
+            where.append("a.result = %(resultado)s")
+            params["resultado"] = query.resultado
+        if query.recurso_tipo:
+            legacy = " OR (a.resource_type IS NULL AND a.resource LIKE 'reports/%%')"                 if query.recurso_tipo is AuditResourceType.REPORT else ""
+            where.append(f"(a.resource_type = %(rtype)s{legacy})")
+            params["rtype"] = query.recurso_tipo.value
+        if query.recurso_id:
+            where.append("COALESCE(a.resource_id, CASE WHEN a.resource LIKE 'reports/%%' "
+                         "THEN substr(a.resource, 9) END) = %(rid)s")
+            params["rid"] = query.recurso_id
+        clause = " AND ".join(where)
+        try:
+            with self._pool.connection() as conn:
+                total = conn.execute(f"SELECT count(*) FROM audit_events a WHERE {clause}", params).fetchone()[0]
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute(
+                        f"SELECT a.id, a.actor_user_id, a.action, a.resource, a.fecha, a.result, a.motivo, "
+                        f"a.resource_type, a.resource_id, a.metadata FROM audit_events a WHERE {clause} "
+                        f"ORDER BY a.fecha DESC, a.id DESC LIMIT %(limit)s OFFSET %(offset)s", params)
+                    rows = cur.fetchall()
+                affected = {r["resource_id"] for r in rows if r["resource_type"] == "user"}
+                ids = list({r["actor_user_id"] for r in rows} | {UUID(i) for i in affected})
+                names = {} if not ids else {
+                    row[0]: display_name(row[1], row[2]) for row in conn.execute(
+                        "SELECT id, nombre, apellido_paterno FROM usuario WHERE id = ANY(%s)", (ids,))
+                }
+        except psycopg.Error as error:
+            raise DependencyUnavailableError("audit storage unavailable") from error
+        records = []
+        for r in rows:
+            rtype, rid = r["resource_type"], r["resource_id"]
+            if rtype is None and r["resource"].startswith("reports/"):
+                rtype, rid = "report", r["resource"][len("reports/"):]
+            records.append(AuditRecord(
+                id=r["id"], fecha=r["fecha"], admin_id=r["actor_user_id"], admin_nombre=names.get(r["actor_user_id"]),
+                action=LEGACY_ACTIONS[r["action"]].value if r["action"] in LEGACY_ACTIONS else r["action"],
+                resource_type=rtype, resource_id=rid,
+                afectado_nombre=names.get(UUID(rid)) if rtype == "user" else None,
+                motivo=r["motivo"], result=r["result"], metadata=r["metadata"],
+            ))
+        return records, total
 
     def _as_report(self, row: dict) -> ReportRecord:
         return ReportRecord(

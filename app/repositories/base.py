@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
+from app.schemas.audit import AdminAuditEntry, AuditQuery
 from app.schemas.user import (
     ConsentCreate,
     ConsentRead,
@@ -44,6 +45,75 @@ class LocationRecord:
     actualizada_en: datetime
 
 
+# HU-47. Un reporte pendiente se resuelve de tres formas; uno "revisado" aun puede escalarse a sancion.
+# "descartado" y "escalado" son finales aqui (la sancion la sigue HU-45). Repetir el estado actual no es un cambio.
+REPORT_TRANSITIONS: dict[str, tuple[str, ...]] = {
+    "pendiente": ("revisado", "descartado", "escalado"),
+    "revisado": ("escalado",),
+    "descartado": (),
+    "escalado": (),
+}
+
+
+class InvalidReportTransitionError(Exception):
+    """The report is already closed in a way that does not allow the requested state."""
+
+
+@dataclass(frozen=True)
+class SanctionRecord:
+    """HU-45. `estado` is what is stored (activa | levantada); whether a temporal one is still in force depends
+    on `fin` and the current time (see state_at / in_force_at), so it expires on its own."""
+
+    id: UUID
+    usuario_id: UUID
+    tipo: str
+    motivo: str
+    inicio: datetime
+    fin: datetime | None
+    admin_id: UUID | None
+    reporte_id: UUID | None
+    estado: str
+    levantada_por: UUID | None
+    levantada_en: datetime | None
+    motivo_levantamiento: str | None
+    fecha_creacion: datetime
+
+    def in_force_at(self, now: datetime) -> bool:
+        return self.estado == "activa" and (self.fin is None or self.fin > now)
+
+    def state_at(self, now: datetime) -> str:
+        if self.estado == "levantada":
+            return "levantada"
+        return "activa" if self.in_force_at(now) else "vencida"
+
+
+class SanctionConflictError(Exception):
+    """The account already has a sanction in force."""
+
+
+class SanctionTargetNotFoundError(Exception):
+    """The account to sanction does not exist (or was deleted)."""
+
+
+class SanctionReportError(Exception):
+    """The report given as origin does not exist, is not escalated or is about someone else."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason  # not_found | not_escalated | other_target
+
+
+class DependencyUnavailableError(Exception):
+    """The database (or another dependency) failed; the API answers 503, never 500."""
+
+
+def display_name(nombre: str | None, apellido_paterno: str | None) -> str | None:
+    """'Ana T.': enough to recognise a person in the audit log without exposing their full data."""
+    if not nombre:
+        return None
+    return f"{nombre} {(apellido_paterno or '')[:1].upper()}.".replace(" .", "")
+
+
 @dataclass(frozen=True)
 class AuditEvent:
     user_id: UUID
@@ -51,6 +121,29 @@ class AuditEvent:
     resource: str
     timestamp: datetime
     result: str
+    # HU-48: only administrative actions fill these; older events keep them empty.
+    id: UUID = field(default_factory=uuid4)
+    motivo: str | None = None
+    resource_type: str | None = None
+    resource_id: str | None = None
+    metadata: dict | None = None
+
+
+@dataclass(frozen=True)
+class AuditRecord:
+    """One row of the admin audit history, already with the (short) names of the people involved."""
+
+    id: UUID
+    fecha: datetime
+    admin_id: UUID
+    admin_nombre: str | None
+    action: str
+    resource_type: str | None
+    resource_id: str | None
+    afectado_nombre: str | None
+    motivo: str | None
+    result: str
+    metadata: dict | None
 
 
 @dataclass(frozen=True)
@@ -235,8 +328,57 @@ class UserRepository(Protocol):
         reporter_role is saved as it was when the report was sent."""
         ...
 
-    def list_reports(self, estado: str | None, limit: int) -> list[ReportRecord]:
+    def list_reports(self, estado: str | None, limit: int, offset: int = 0) -> list[ReportRecord]:
         """Newest first; all states when estado is None."""
         ...
 
-    def review_report(self, report_id: UUID, estado: str, reviewer_id: UUID) -> ReportRecord | None: ...
+    def review_report(
+        self, report_id: UUID, estado: str, reviewer_id: UUID, motivo: str | None = None
+    ) -> ReportRecord | None:
+        """Moves the report to `estado` and writes its audit row in the same transaction: if the audit cannot
+        be written the change is not saved either (DependencyUnavailableError). motivo defaults to the
+        report's own reason. Same state as now: returns it untouched and audits nothing. A state REPORT_TRANSITIONS
+        does not allow raises InvalidReportTransitionError. None when the report does not exist."""
+        ...
+
+    # -- HU-45: sanctions ------------------------------------------------------------------------
+
+    def get_active_sanction(self, user_id: UUID, now: datetime) -> SanctionRecord | None:
+        """The sanction in force for this account at `now`, if any."""
+        ...
+
+    def apply_sanction(
+        self, *, sanction_id: UUID, user_id: UUID, tipo: str, dias: int | None, motivo: str, admin_id: UUID,
+        report_id: UUID | None, now: datetime, fin: datetime | None,
+    ) -> SanctionRecord:
+        """One transaction: closes expired ones of the account, refuses a second one in force
+        (SanctionConflictError), checks the origin report (SanctionReportError), saves the sanction and its
+        SANCTION_APPLIED audit row. If the audit cannot be written nothing is saved (DependencyUnavailableError)."""
+        ...
+
+    def lift_sanction(
+        self, sanction_id: UUID, admin_id: UUID, motivo: str, now: datetime
+    ) -> tuple[SanctionRecord, bool] | None:
+        """(sanction, changed). Lifting one already lifted or already expired changes nothing and audits nothing.
+        None if it does not exist. The SANCTION_LIFTED audit row is written in the same transaction."""
+        ...
+
+    def get_sanction(self, sanction_id: UUID) -> SanctionRecord | None: ...
+
+    def list_sanctions(
+        self, estado: str | None, user_id: UUID | None, limit: int, offset: int, now: datetime
+    ) -> list[SanctionRecord]:
+        """Newest first. estado: activa | levantada | vencida (computed from `fin`), None for all."""
+        ...
+
+    def add_notification(self, user_id: UUID, tipo: str, titulo: str, mensaje: str, data: dict) -> None:
+        """Save a notice for the account (users.notificacion) and, when the push inbox exists, queue it there."""
+        ...
+
+    def record_admin_audit(self, entry: AdminAuditEntry) -> None:
+        """Write one administrative action in its own transaction (DependencyUnavailableError on failure)."""
+        ...
+
+    def list_admin_audit(self, query: AuditQuery) -> tuple[list[AuditRecord], int]:
+        """(page of the history newest first, total rows matching the filters). Read only."""
+        ...
