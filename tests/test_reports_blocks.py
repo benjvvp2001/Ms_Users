@@ -175,4 +175,5 @@ def test_only_admins_list_and_review_reports() -> None:
                         json={"estado": "descartado"}).status_code == 404
     assert [r["id"] for r in client.get(f"{USERS}/admin/reports?estado=revisado",
                                         headers=admin["headers"]).json()] == [first["id"]]
-    assert len(client.get(f"{USERS}/admin/reports", headers=admin["headers"]).json()) == 2
+    assert len(client.get(f"{USERS}/admin/reports?estado=todos", headers=admin["headers"]).json()) == 2
+    assert len(client.get(f"{USERS}/admin/reports", headers=admin["headers"]).json()) == 1   # Default: pending only.

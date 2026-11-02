@@ -389,18 +389,46 @@ class ReportCreate(APIModel):
         return self
 
 
+class ReportedPerson(APIModel):
+    """Persona de un reporte (quien reporta o a quien se reportó): id y nombre corto, sin correo, RUT ni foto."""
+
+    user_id: UUID
+    nombre: str
+    apellido_inicial: str
+
+
 class ReportRead(ReportCreate):
     id: UUID
-    reportante: PublicAthlete | None
+    reportante: ReportedPerson | None
     # Rol de la cuenta que reportó al momento del reporte (p. ej. club_admin o player).
     reportante_rol: str | None = None
-    estado: Literal["pendiente", "revisado", "descartado"]
+    estado: Literal["pendiente", "revisado", "descartado", "escalado"]
+    # Solo para reportes de personas; objetivo_nombre lo escribe quien reporta, este viene de la cuenta.
+    reportado: ReportedPerson | None = None
     fecha_creacion: datetime
     fecha_revision: datetime | None
 
 
+class ReportListQuery(APIModel):
+    """Filtros de GET /admin/reports. Sin estado se listan los pendientes; "todos" trae cualquiera."""
+
+    estado: Literal["pendiente", "revisado", "descartado", "escalado", "todos"] = "pendiente"
+    limit: int = Field(default=50, ge=1, le=100)
+    pagina: int = Field(default=1, ge=1, le=10_000)
+
+
 class ReportReview(APIModel):
-    estado: Literal["revisado", "descartado"]
+    estado: Literal["revisado", "descartado", "escalado"]
+    # Motivo de la decisión para la auditoría (HU-48). Si falta, se usa el motivo del propio reporte.
+    motivo: str | None = Field(default=None, min_length=3, max_length=300)
+
+    @field_validator("motivo")
+    @classmethod
+    def clean_motivo(cls, value: str | None) -> str | None:
+        if value is not None:
+            from app.schemas.audit import check_audit_text
+            check_audit_text(value, "motivo")
+        return value
 
 
 class ConsentCreate(APIModel):

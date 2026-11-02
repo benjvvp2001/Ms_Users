@@ -4,23 +4,30 @@ import math
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.api.internal import accounts_router as internal_accounts_router
+from app.api.internal import router as internal_router
 from app.api.v1.users import router
 from app.core.config import get_database_url, get_email_settings, get_settings
 from app.database.session import create_pool
-from app.repositories.base import UserRepository
+from app.repositories.base import DependencyUnavailableError, UserRepository
 from app.repositories.postgres_user_repository import PostgresUserRepository
 from app.services.email_sender import EmailSender
+from app.services.sanction_service import AccountSuspendedError
 
 
 def _finite_or_text(value: float):
     """A number such as 1e999 reaches validation as infinity, which JSON cannot carry: the error
     message that echoes the received value would fail to serialize and answer 500 instead of 422."""
     return value if math.isfinite(value) else str(value)
+
+
+_NO_ECHO_PREFIXES = ("/api/v1/users/admin/audit-events", "/api/v1/users/admin/reports",
+                     "/api/v1/users/admin/sanctions", "/internal/")
 
 
 def create_app(
@@ -62,13 +69,28 @@ def create_app(
         app.state.repository = repository
 
     @app.exception_handler(RequestValidationError)
-    async def invalid_request(_, error: RequestValidationError) -> JSONResponse:
+    async def invalid_request(request: Request, error: RequestValidationError) -> JSONResponse:
+        if request.url.path.startswith(_NO_ECHO_PREFIXES):
+            # Audit routes: say which field failed and why, never what was sent.
+            return JSONResponse(status_code=422, content={"detail": [
+                {"type": e["type"], "loc": jsonable_encoder(e["loc"]),
+                 "msg": e["msg"] if e["type"] == "value_error" else "Valor inválido."}
+                for e in error.errors()]})
         # The same 422 body as FastAPI's own, but able to carry an infinite number.
         return JSONResponse(status_code=422, content={"detail": jsonable_encoder(
             error.errors(), custom_encoder={float: _finite_or_text})})
+    @app.exception_handler(AccountSuspendedError)
+    async def account_suspended(_, error: AccountSuspendedError) -> JSONResponse:
+        return JSONResponse(status_code=403, content=error.body())
+
+    @app.exception_handler(DependencyUnavailableError)
+    async def dependency_unavailable(_, error: DependencyUnavailableError) -> JSONResponse:
+        return JSONResponse(status_code=503, content={"detail": "service temporarily unavailable"})
     if email_sender is not None:
         app.state.email_sender = email_sender
     app.include_router(router)
+    app.include_router(internal_router)
+    app.include_router(internal_accounts_router)
 
     @app.get("/api/v1/users/health/ready", tags=["health"])
     def ready() -> dict[str, str]:

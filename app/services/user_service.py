@@ -19,6 +19,7 @@ from app.core.security import (
 )
 from app.repositories.base import (
     ATHLETE_ROLES,
+    InvalidReportTransitionError,
     LocationRecord,
     NewEmailVerification,
     ReportRecord,
@@ -50,6 +51,7 @@ from app.schemas.user import (
     PublicAthlete,
     ReportCreate,
     ReportRead,
+    ReportedPerson,
     RegisterRequest,
     RegisterResponse,
     RoleRead,
@@ -59,6 +61,7 @@ from app.schemas.user import (
     UserSport,
 )
 from app.core.recommendations import compatibility, distance_km, similar_level
+from app.services.sanction_service import AccountSuspendedError, ensure_not_suspended
 from app.services.email_sender import (
     EmailSender,
     deliver_safely,
@@ -172,7 +175,12 @@ class UserService:
                 detail="invalid email or password",
             )
         # Checked after the password, so it reveals nothing to someone who
-        # doesn't already know the credentials.
+        # doesn't already know the credentials. HU-45: a sanctioned account cannot sign in.
+        try:
+            ensure_not_suspended(self._repository, user.id)
+        except AccountSuspendedError:
+            self._repository.record_audit(user_id=user.id, action="login", resource="auth", result="failure")
+            raise
         if not user.email_verified:
             self._repository.record_audit(
                 user_id=user.id,
@@ -531,17 +539,25 @@ class UserService:
             raise HTTPException(409, "Ya enviaste este reporte. Lo estamos revisando.")
         return self._as_report(record)
 
-    def list_reports(self, current_user: StoredUser, estado: str | None, limit: int) -> list[ReportRead]:
+    def list_reports(
+        self, current_user: StoredUser, estado: str | None, limit: int, pagina: int = 1
+    ) -> list[ReportRead]:
+        """Newest first. estado None lists every state; pagina starts at 1."""
         self._require_admin(current_user)
-        return [self._as_report(record) for record in self._repository.list_reports(estado, limit)]
+        records = self._repository.list_reports(estado, limit, (pagina - 1) * limit)
+        return [self._as_report(record) for record in records]
 
-    def review_report(self, current_user: StoredUser, report_id: UUID, estado: str) -> ReportRead:
+    def review_report(
+        self, current_user: StoredUser, report_id: UUID, estado: str, motivo: str | None = None
+    ) -> ReportRead:
         self._require_admin(current_user)
-        record = self._repository.review_report(report_id, estado, current_user.id)
+        # The repository saves the decision and its audit row (HU-48) in one transaction.
+        try:
+            record = self._repository.review_report(report_id, estado, current_user.id, motivo)
+        except InvalidReportTransitionError:
+            raise HTTPException(409, "Este reporte ya fue resuelto y no admite ese cambio.") from None
         if record is None:
             raise HTTPException(404, "Reporte no encontrado.")
-        self._repository.record_audit(user_id=current_user.id, action=f"report_{estado}",
-                                      resource=f"reports/{report_id}", result="success")
         return self._as_report(record)
 
     def _require_admin(self, current_user: StoredUser) -> None:
@@ -555,10 +571,22 @@ class UserService:
 
     def _as_report(self, record: ReportRecord) -> ReportRead:
         reporter = None if record.reportante_id is None else self._repository.get_user(record.reportante_id)
+        reported = None
+        if record.tipo == "usuario":
+            try:
+                target = self._repository.get_user(UUID(record.objetivo_id))
+            except ValueError:
+                target = None
+            if target is not None:
+                reported = ReportedPerson(user_id=target.id, nombre=target.profile.nombre,
+                                          apellido_inicial=f"{target.profile.apellido_paterno[:1].upper()}.")
         return ReportRead(
+            reportado=reported,
             id=record.id, tipo=record.tipo, objetivo_id=record.objetivo_id,
             objetivo_nombre=record.objetivo_nombre, motivo=record.motivo, detalle=record.detalle,
-            reportante=None if reporter is None else self._as_public(reporter),
+            reportante=None if reporter is None else ReportedPerson(
+                user_id=reporter.id, nombre=reporter.profile.nombre,
+                apellido_inicial=f"{reporter.profile.apellido_paterno[:1].upper()}."),
             reportante_rol=record.reportante_rol,
             estado=record.estado, fecha_creacion=record.fecha_creacion, fecha_revision=record.fecha_revision,
         )
@@ -750,6 +778,7 @@ class UserService:
         )
 
     def _issue_token(self, user: StoredUser) -> TokenResponse:
+        ensure_not_suspended(self._repository, user.id)  # HU-45: no token for a sanctioned account
         token, expires_in_seconds = create_access_token(user.id, user.role, user.email)
         # El rol decide el frontend: las cuentas de club van al sitio web, el resto a la app.
         es_club = user.role == CLUB_ROLE

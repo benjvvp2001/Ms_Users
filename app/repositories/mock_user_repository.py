@@ -9,14 +9,24 @@ from app.core.recommendations import compatibility, distance_km, matches_filters
 from app.repositories.base import (
     LocationRecord,
     ATHLETE_ROLES,
+    REPORT_TRANSITIONS,
     AuditEvent,
+    InvalidReportTransitionError,
+    SanctionConflictError,
+    SanctionRecord,
+    SanctionReportError,
+    SanctionTargetNotFoundError,
+    AuditRecord,
+    DependencyUnavailableError,
     EmailVerificationRecord,
     NewEmailVerification,
     PasswordResetRecord,
     ReportRecord,
     StoredUser,
     SuggestionCandidate,
+    display_name,
 )
+from app.schemas.audit import LEGACY_ACTIONS, AdminAuditEntry, AuditAction, AuditQuery, AuditResourceType
 from app.schemas.user import ConsentCreate, ConsentRead, PreferencesReplace, ProfileReplace, ReportCreate
 
 
@@ -34,6 +44,11 @@ class MockUserRepository:
         self._reports: dict[UUID, ReportRecord] = {}
         self._locations: dict[UUID, LocationRecord] = {}
         self._lock = RLock()
+        # Tests set it to simulate the audit storage failing.
+        self.audit_unavailable = False
+        self._sanctions: dict[UUID, SanctionRecord] = {}
+        self.notifications: list[dict] = []
+        self.notifications_unavailable = False
 
     def create_user(
         self,
@@ -383,15 +398,159 @@ class MockUserRepository:
             self._reports[record.id] = record
             return record
 
-    def list_reports(self, estado: str | None, limit: int) -> list[ReportRecord]:
+    def list_reports(self, estado: str | None, limit: int, offset: int = 0) -> list[ReportRecord]:
         with self._lock:
             rows = [r for r in reversed(self._reports.values()) if estado is None or r.estado == estado]
-        return rows[:limit]
+        return rows[offset:offset + limit]
 
-    def review_report(self, report_id: UUID, estado: str, reviewer_id: UUID) -> ReportRecord | None:
+    def review_report(
+        self, report_id: UUID, estado: str, reviewer_id: UUID, motivo: str | None = None
+    ) -> ReportRecord | None:
         with self._lock:
             if report_id not in self._reports:
                 return None
-            record = replace(self._reports[report_id], estado=estado, fecha_revision=datetime.now(timezone.utc))
+            current = self._reports[report_id]
+            if current.estado == estado:
+                return current  # Same decision again: no change, no new audit row.
+            if estado not in REPORT_TRANSITIONS.get(current.estado, ()):
+                raise InvalidReportTransitionError(current.estado)
+            if self.audit_unavailable:  # nothing is saved when the audit cannot be written
+                raise DependencyUnavailableError("audit storage unavailable")
+            record = replace(current, estado=estado, fecha_revision=datetime.now(timezone.utc))
             self._reports[report_id] = record
+            self._append_admin_audit(AdminAuditEntry(
+                actor_user_id=reviewer_id,
+                action={"revisado": AuditAction.REPORT_REVIEWED, "descartado": AuditAction.REPORT_DISCARDED,
+                        "escalado": AuditAction.REPORT_ESCALATED}[estado],
+                resource_type=AuditResourceType.REPORT, resource_id=str(report_id),
+                motivo=motivo or current.motivo, metadata={"tipo": current.tipo, "desde": current.estado},
+            ))
             return record
+
+    def _append_admin_audit(self, entry: AdminAuditEntry) -> None:
+        self._audit_events.append(AuditEvent(
+            user_id=entry.actor_user_id, action=entry.action.value,
+            resource=f"{entry.resource_type.value}/{entry.resource_id}", timestamp=datetime.now(timezone.utc),
+            result=entry.result, motivo=entry.motivo, resource_type=entry.resource_type.value,
+            resource_id=entry.resource_id, metadata=entry.metadata,
+        ))
+
+    # -- HU-45: sanctions ------------------------------------------------------------------------
+
+    def get_active_sanction(self, user_id: UUID, now: datetime) -> SanctionRecord | None:
+        with self._lock:
+            return next((s for s in self._sanctions.values() if s.usuario_id == user_id and s.in_force_at(now)), None)
+
+    def apply_sanction(
+        self, *, sanction_id: UUID, user_id: UUID, tipo: str, dias: int | None, motivo: str, admin_id: UUID,
+        report_id: UUID | None, now: datetime, fin: datetime | None,
+    ) -> SanctionRecord:
+        with self._lock:
+            if user_id not in self._users:
+                raise SanctionTargetNotFoundError(user_id)
+            for key, s in list(self._sanctions.items()):   # an ended temporal one is closed here
+                if s.usuario_id == user_id and s.estado == "activa" and s.fin is not None and s.fin <= now:
+                    self._sanctions[key] = replace(s, estado="levantada", levantada_en=s.fin,
+                                                   motivo_levantamiento="Vencimiento automático")
+            if any(s.usuario_id == user_id and s.estado == "activa" for s in self._sanctions.values()):
+                raise SanctionConflictError(user_id)
+            if report_id is not None:
+                report = self._reports.get(report_id)
+                if report is None:
+                    raise SanctionReportError("not_found")
+                if report.estado != "escalado":
+                    raise SanctionReportError("not_escalated")
+                if report.tipo != "usuario" or report.objetivo_id != str(user_id):
+                    raise SanctionReportError("other_target")
+            if self.audit_unavailable:  # nothing is saved when the audit cannot be written
+                raise DependencyUnavailableError("audit storage unavailable")
+            record = SanctionRecord(
+                id=sanction_id, usuario_id=user_id, tipo=tipo, motivo=motivo, inicio=now, fin=fin, admin_id=admin_id,
+                reporte_id=report_id, estado="activa", levantada_por=None, levantada_en=None,
+                motivo_levantamiento=None, fecha_creacion=now)
+            self._sanctions[sanction_id] = record
+            self._append_admin_audit(AdminAuditEntry(
+                actor_user_id=admin_id, action=AuditAction.SANCTION_APPLIED, resource_type=AuditResourceType.USER,
+                resource_id=str(user_id), motivo=motivo,
+                metadata={"sancion_id": str(sanction_id), "tipo": tipo, "dias": dias,
+                          "reporte_id": None if report_id is None else str(report_id)}))
+            return record
+
+    def lift_sanction(
+        self, sanction_id: UUID, admin_id: UUID, motivo: str, now: datetime
+    ) -> tuple[SanctionRecord, bool] | None:
+        with self._lock:
+            current = self._sanctions.get(sanction_id)
+            if current is None:
+                return None
+            if not current.in_force_at(now):
+                return current, False
+            if self.audit_unavailable:
+                raise DependencyUnavailableError("audit storage unavailable")
+            record = replace(current, estado="levantada", levantada_por=admin_id, levantada_en=now,
+                             motivo_levantamiento=motivo)
+            self._sanctions[sanction_id] = record
+            self._append_admin_audit(AdminAuditEntry(
+                actor_user_id=admin_id, action=AuditAction.SANCTION_LIFTED, resource_type=AuditResourceType.USER,
+                resource_id=str(current.usuario_id), motivo=motivo,
+                metadata={"sancion_id": str(sanction_id), "tipo": current.tipo}))
+            return record, True
+
+    def get_sanction(self, sanction_id: UUID) -> SanctionRecord | None:
+        with self._lock:
+            return self._sanctions.get(sanction_id)
+
+    def list_sanctions(
+        self, estado: str | None, user_id: UUID | None, limit: int, offset: int, now: datetime
+    ) -> list[SanctionRecord]:
+        with self._lock:
+            rows = [s for s in reversed(self._sanctions.values())
+                    if (estado is None or s.state_at(now) == estado) and (user_id is None or s.usuario_id == user_id)]
+        return rows[offset:offset + limit]
+
+    def add_notification(self, user_id: UUID, tipo: str, titulo: str, mensaje: str, data: dict) -> None:
+        with self._lock:
+            if self.notifications_unavailable:
+                raise DependencyUnavailableError("notification storage unavailable")
+            self.notifications.append({"usuario_id": user_id, "tipo": tipo, "titulo": titulo, "mensaje": mensaje,
+                                       "data": data})
+
+    def record_admin_audit(self, entry: AdminAuditEntry) -> None:
+        with self._lock:
+            if self.audit_unavailable:
+                raise DependencyUnavailableError("audit storage unavailable")
+            self._append_admin_audit(entry)
+
+    def list_admin_audit(self, query: AuditQuery) -> tuple[list[AuditRecord], int]:
+        catalog = {a.value for a in AuditAction}
+        with self._lock:
+            events = [e for e in reversed(self._audit_events) if e.action in catalog or e.action in LEGACY_ACTIONS]
+            users = dict(self._users)
+
+        def name(user_id: UUID) -> str | None:
+            user = users.get(user_id)
+            return None if user is None else display_name(user.profile.nombre, user.profile.apellido_paterno)
+
+        def normalized(event: AuditEvent) -> AuditRecord:
+            rtype, rid = event.resource_type, event.resource_id
+            if rtype is None and event.resource.startswith("reports/"):
+                rtype, rid = "report", event.resource[len("reports/"):]
+            action = LEGACY_ACTIONS[event.action].value if event.action in LEGACY_ACTIONS else event.action
+            return AuditRecord(
+                id=event.id, fecha=event.timestamp, admin_id=event.user_id, admin_nombre=name(event.user_id),
+                action=action, resource_type=rtype, resource_id=rid,
+                afectado_nombre=name(UUID(rid)) if rtype == "user" and rid else None,
+                motivo=event.motivo, result=event.result, metadata=event.metadata,
+            )
+
+        rows = [normalized(e) for e in events]
+        rows = [r for r in rows
+                if (not query.desde or r.fecha >= query.desde) and (not query.hasta or r.fecha <= query.hasta)
+                and (not query.admin_id or r.admin_id == query.admin_id)
+                and (not query.accion or r.action == query.accion.value)
+                and (not query.recurso_tipo or r.resource_type == query.recurso_tipo.value)
+                and (not query.recurso_id or r.resource_id == query.recurso_id)
+                and (not query.resultado or r.result == query.resultado)]
+        rows.sort(key=lambda r: r.fecha, reverse=True)  # stable: same instant keeps newest-inserted first
+        start = (query.pagina - 1) * query.por_pagina
+        return rows[start:start + query.por_pagina], len(rows)

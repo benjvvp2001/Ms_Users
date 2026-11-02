@@ -138,3 +138,11 @@ def get_database_url() -> str:
     if not database_url:
         raise RuntimeError("USERS_DATABASE_URL must be configured before starting the service")
     return database_url
+
+
+def get_internal_service_token() -> str | None:
+    """Shared secret that other services send to Ms_Users' internal endpoints (HU-48). None = not configured."""
+    token = os.getenv("INTERNAL_SERVICE_TOKEN")
+    if token and len(token.encode("utf-8")) < 32:
+        raise RuntimeError("INTERNAL_SERVICE_TOKEN must contain at least 32 bytes")
+    return token or None
