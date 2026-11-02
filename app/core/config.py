@@ -140,6 +140,30 @@ def get_database_url() -> str:
     return database_url
 
 
+@dataclass(frozen=True)
+class ContentAuthorSettings:
+    """Where to ask who made a reported activity (Ms_Activities) or message (Ms_Matching). None = not configured."""
+
+    activities_url: str | None
+    matching_url: str | None
+    timeout_seconds: float
+
+
+def get_content_author_settings() -> ContentAuthorSettings:
+    raw = os.getenv("CONTENT_AUTHOR_TIMEOUT_SECONDS", "2")
+    try:
+        timeout = float(raw)
+    except ValueError as error:
+        raise RuntimeError("CONTENT_AUTHOR_TIMEOUT_SECONDS must be a number") from error
+    if not 0 < timeout <= 30:
+        raise RuntimeError("CONTENT_AUTHOR_TIMEOUT_SECONDS must be between 0 and 30")
+    return ContentAuthorSettings(
+        activities_url=os.getenv("ACTIVITIES_SERVICE_URL") or None,
+        matching_url=os.getenv("MATCHING_SERVICE_URL") or None,
+        timeout_seconds=timeout,
+    )
+
+
 def get_internal_service_token() -> str | None:
     """Shared secret that other services send to Ms_Users' internal endpoints (HU-48). None = not configured."""
     token = os.getenv("INTERNAL_SERVICE_TOKEN")

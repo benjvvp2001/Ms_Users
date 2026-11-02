@@ -403,6 +403,24 @@ class MockUserRepository:
             rows = [r for r in reversed(self._reports.values()) if estado is None or r.estado == estado]
         return rows[offset:offset + limit]
 
+    def list_reports_without_author(self, estado: str | None, limit: int, offset: int = 0) -> list[ReportRecord]:
+        with self._lock:
+            rows = [r for r in reversed(self._reports.values())
+                    if r.tipo in ("actividad", "mensaje") and r.autor_id is None and (estado is None or r.estado == estado)]
+        return rows[offset:offset + limit]
+
+    def set_report_author(
+        self, report_id: UUID, autor_id: UUID | None, consulted_at: datetime
+    ) -> ReportRecord | None:
+        with self._lock:
+            current = self._reports.get(report_id)
+            if current is None or current.tipo not in ("actividad", "mensaje"):
+                return None
+            known = autor_id if autor_id in self._users else None
+            record = replace(current, autor_id=known, autor_consultado_en=consulted_at)
+            self._reports[report_id] = record
+            return record
+
     def review_report(
         self, report_id: UUID, estado: str, reviewer_id: UUID, motivo: str | None = None
     ) -> ReportRecord | None:
@@ -416,7 +434,8 @@ class MockUserRepository:
                 raise InvalidReportTransitionError(current.estado)
             if self.audit_unavailable:  # nothing is saved when the audit cannot be written
                 raise DependencyUnavailableError("audit storage unavailable")
-            record = replace(current, estado=estado, fecha_revision=datetime.now(timezone.utc))
+            record = replace(current, estado=estado, fecha_revision=datetime.now(timezone.utc),
+                             revisado_por=reviewer_id, motivo_revision=motivo)
             self._reports[report_id] = record
             self._append_admin_audit(AdminAuditEntry(
                 actor_user_id=reviewer_id,
@@ -460,7 +479,7 @@ class MockUserRepository:
                     raise SanctionReportError("not_found")
                 if report.estado != "escalado":
                     raise SanctionReportError("not_escalated")
-                if report.tipo != "usuario" or report.objetivo_id != str(user_id):
+                if (report.objetivo_id != str(user_id)) if report.tipo == "usuario" else (report.autor_id != user_id):
                     raise SanctionReportError("other_target")
             if self.audit_unavailable:  # nothing is saved when the audit cannot be written
                 raise DependencyUnavailableError("audit storage unavailable")

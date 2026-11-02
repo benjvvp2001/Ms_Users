@@ -60,7 +60,7 @@ def test_the_migration_list_covers_every_file_in_order():
     files = sorted(path.name for path in DIRECTORY.glob("*.sql"))
     assert migration_names(False) == files                       # a new file that is not in migrate.py fails here
     assert migration_names(True) == files[1:]
-    assert MIGRATIONS[-1] == "013_audit_fecha_timestamptz.sql"
+    assert MIGRATIONS[-1] == "014_reporte_revision_autor.sql"
 
 
 def test_all_migrations_in_order_on_an_empty_base_give_a_listing_that_works(base):
