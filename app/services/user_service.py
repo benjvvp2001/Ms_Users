@@ -7,7 +7,9 @@ from fastapi import BackgroundTasks, HTTPException, status
 
 from app.core.config import get_email_settings, get_settings
 from app.services.content_authors import ContentAuthors
-from app.core.config import EmailSettings, LocationSettings, get_location_settings
+from app.core.config import EmailSettings, LocationSettings, PhotoSettings, get_location_settings, get_photo_settings
+from app.storage.images import PhotoRejected, check_declared_type, check_filename, process_photo
+from app.storage.photos import PhotoStorage, PhotoStorageError, content_type_of, is_photo_key, new_photo_key, photo_url
 from app.core.security import (
     create_access_token,
     generate_one_time_code,
@@ -105,7 +107,10 @@ class UserService:
     def __init__(
         self, repository: UserRepository, email_sender: EmailSender | None = None,
         location: LocationSettings | None = None, content_authors: ContentAuthors | None = None,
+        photo_storage: PhotoStorage | None = None, photo_settings: PhotoSettings | None = None,
     ) -> None:
+        self._photo_storage = photo_storage
+        self._photo_settings = photo_settings
         self._repository = repository
         self._email_sender = email_sender
         self._location = location or get_location_settings()
@@ -373,8 +378,10 @@ class UserService:
         self, current_user: StoredUser, user_id: UUID, payload: ProfileReplace
     ) -> ProfileRead:
         self._authorize(current_user, user_id)
-        self._get_user_or_404(user_id)
+        current = self._get_user_or_404(user_id)
 
+        # HU-61: the photo is only changed through the photo endpoints; whatever the client sends here is ignored.
+        payload = payload.model_copy(update={"foto_perfil": current.profile.foto_perfil})
         user = self._repository.replace_profile(user_id, payload)
         self._repository.record_audit(
             user_id=current_user.id,
@@ -383,6 +390,79 @@ class UserService:
             result="success",
         )
         return self._as_profile(user)
+
+    # -- profile photo (HU-61) ----------------------------------------------
+
+    def _storage(self) -> PhotoStorage:
+        if self._photo_storage is None:
+            raise HTTPException(status_code=503, detail="service temporarily unavailable")
+        return self._photo_storage
+
+    def _require_owner(self, current_user: StoredUser, user_id: UUID) -> None:
+        """Only the person themself, not even an administrator, changes their photo."""
+        if current_user.id != user_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="not authorized to access this resource")
+
+    def photo_limits(self) -> PhotoSettings:
+        return self._photo_settings or get_photo_settings()
+
+    def replace_photo(
+        self, current_user: StoredUser, user_id: UUID, *, filename: str | None, content_type: str | None, data: bytes,
+    ) -> ProfileRead:
+        self._require_owner(current_user, user_id)
+        storage = self._storage()
+        limits = self.photo_limits()
+        try:
+            check_filename(filename)
+            check_declared_type(content_type)
+            photo = process_photo(data, max_bytes=limits.max_bytes, max_side=limits.max_side,
+                                  max_pixels=limits.max_pixels)
+        except PhotoRejected as rejected:
+            self._repository.record_audit(user_id=current_user.id, action="upload_profile_photo",
+                                          resource=f"users/{user_id}/profile/photo", result="failure")
+            raise HTTPException(status_code=rejected.status, detail=rejected.detail) from rejected
+
+        key = new_photo_key(photo.extension)
+        try:
+            storage.save(key, photo.data)
+        except PhotoStorageError as error:
+            raise HTTPException(status_code=503, detail="service temporarily unavailable") from error
+        try:
+            found, previous = self._repository.set_photo(user_id, key)
+        except Exception:
+            storage.delete(key)  # the profile still points at the old photo; do not leave the new file behind
+            raise
+        if not found:
+            storage.delete(key)
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="user not found")
+        if previous and previous != key:
+            storage.delete(previous)
+        self._repository.record_audit(user_id=current_user.id, action="upload_profile_photo",
+                                      resource=f"users/{user_id}/profile/photo", result="success")
+        return self._as_profile(self._get_user_or_404(user_id))
+
+    def remove_photo(self, current_user: StoredUser, user_id: UUID) -> ProfileRead:
+        """Idempotent: removing a photo that is not there answers the same profile."""
+        self._require_owner(current_user, user_id)
+        storage = self._storage()
+        found, previous = self._repository.set_photo(user_id, None)
+        if not found:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="user not found")
+        if previous:
+            storage.delete(previous)
+        self._repository.record_audit(user_id=current_user.id, action="delete_profile_photo",
+                                      resource=f"users/{user_id}/profile/photo", result="success")
+        return self._as_profile(self._get_user_or_404(user_id))
+
+    def read_photo(self, key: str) -> tuple[bytes, str] | None:
+        """The bytes and Content-Type of a stored photo, or None. Only keys this service generated are looked up."""
+        if not is_photo_key(key):
+            return None
+        try:
+            data = self._storage().read(key)
+        except PhotoStorageError as error:
+            raise HTTPException(status_code=503, detail="service temporarily unavailable") from error
+        return None if data is None else (data, content_type_of(key))
 
     # -- suggestions ------------------------------------------------------
 
@@ -613,7 +693,7 @@ class UserService:
     def _as_public(self, user: StoredUser) -> PublicAthlete:
         return PublicAthlete(user_id=user.id, nombre=user.profile.nombre,
                              apellido_inicial=f"{user.profile.apellido_paterno[:1].upper()}.",
-                             foto_perfil=user.profile.foto_perfil)
+                             foto_perfil=photo_url(user.profile.foto_perfil))
 
     def _person(self, user_id: UUID | None) -> ReportedPerson | None:
         user = None if user_id is None else self._repository.get_user(user_id)
@@ -738,7 +818,7 @@ class UserService:
 
     def delete_account(self, current_user: StoredUser, user_id: UUID) -> None:
         self._authorize(current_user, user_id)
-        self._get_user_or_404(user_id)
+        account = self._get_user_or_404(user_id)
 
         self._repository.record_audit(
             user_id=current_user.id,
@@ -747,6 +827,9 @@ class UserService:
             result="success",
         )
         self._repository.delete_user(user_id)
+        # HU-61: the profile no longer points at the photo (delete_user cleared it); remove the file too.
+        if self._photo_storage is not None and account.profile.foto_perfil:
+            self._photo_storage.delete(account.profile.foto_perfil)
 
     # -- internal helpers -------------------------------------------------
 
@@ -812,7 +895,9 @@ class UserService:
         )
 
     def _as_profile(self, user: StoredUser) -> ProfileRead:
-        return ProfileRead(user_id=user.id, rut=user.rut, **user.profile.model_dump())
+        data = user.profile.model_dump()
+        data["foto_perfil"] = photo_url(data["foto_perfil"])
+        return ProfileRead(user_id=user.id, rut=user.rut, **data)
 
     def _as_suggestion(
         self, candidate: SuggestionCandidate, mine: list[UserSport]
@@ -822,7 +907,7 @@ class UserService:
             nombre=candidate.nombre,
             apellido_inicial=f"{candidate.apellido_paterno[:1].upper()}.",
             edad=_age(candidate.fecha_nacimiento),
-            foto_perfil=candidate.foto_perfil,
+            foto_perfil=photo_url(candidate.foto_perfil),
             biografia=candidate.biografia,
             deportes=candidate.deportes,
             compatibilidad=compatibility(mine, candidate.deportes),

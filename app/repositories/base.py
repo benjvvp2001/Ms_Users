@@ -242,6 +242,15 @@ class UserRepository(Protocol):
 
     def delete_user(self, user_id: UUID) -> bool: ...
 
+    def set_photo(self, user_id: UUID, key: str | None) -> tuple[bool, str | None]:
+        """HU-61: point the profile at a stored photo (or at none) and return (found, previous key), atomically,
+        so the caller knows which file to delete. Only the photo column changes."""
+        ...
+
+    def photo_keys(self) -> set[str]:
+        """Every photo key any profile points to (to find files nobody references)."""
+        ...
+
     def list_suggestion_candidates(
         self, *, exclude_user_id: UUID, limit: int, filters: SuggestionFilters,
         origin: Zona | LocationRecord | None, sports: list[UserSport], fresh_since: datetime

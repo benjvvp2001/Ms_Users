@@ -27,12 +27,18 @@ def get_content_authors(request: Request):
     return getattr(request.app.state, "content_authors", None)
 
 
+def get_photo_storage(request: Request):
+    # Built in create_app (a folder on a persistent volume); tests inject their own.
+    return getattr(request.app.state, "photo_storage", None)
+
+
 def get_user_service(
     repository: UserRepository = Depends(get_repository),
     email_sender: EmailSender = Depends(get_mailer),
     content_authors=Depends(get_content_authors),
+    photo_storage=Depends(get_photo_storage),
 ) -> UserService:
-    return UserService(repository, email_sender, content_authors=content_authors)
+    return UserService(repository, email_sender, content_authors=content_authors, photo_storage=photo_storage)
 
 
 def get_audit_service(repository: UserRepository = Depends(get_repository)) -> AuditService:

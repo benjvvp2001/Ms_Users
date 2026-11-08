@@ -3,7 +3,9 @@ from __future__ import annotations
 from uuid import UUID
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, Request, Response, status
+from starlette.datastructures import UploadFile
+from starlette.concurrency import run_in_threadpool
 
 from app.api.dependencies import get_audit_service, get_current_user, get_sanction_service, get_user_service
 from app.repositories.base import StoredUser
@@ -378,6 +380,86 @@ def list_audit_events(
     service: AuditService = Depends(get_audit_service),
 ) -> AuditPage:
     return service.list_events(current_user, query)
+
+
+# HU-61. Declared before /{user_id}/... so "photos" is never taken for a user id.
+PHOTO_FIELD = "foto"
+MULTIPART_OVERHEAD = 64 * 1024  # boundaries and headers around the file
+
+
+@router.get(
+    "/photos/{key}", include_in_schema=True,
+    summary="Entregar una foto de perfil",
+    description="Pública: la clave es un valor aleatorio de 128 bits que solo reciben quienes pueden ver ese perfil "
+    "(foto_perfil), y cambia cada vez que la persona cambia su foto. Solo JPG o PNG, con nosniff.",
+)
+def get_photo(key: str, service: UserService = Depends(get_user_service)) -> Response:
+    found = service.read_photo(key)
+    if found is None:
+        raise HTTPException(status_code=404, detail="Foto no encontrada.")
+    data, content_type = found
+    return Response(content=data, media_type=content_type, headers={
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "Content-Disposition": "inline",
+        # The key changes with every new photo, so a stored copy is never stale; it is private to the person's browser.
+        "Cache-Control": "private, max-age=86400, immutable",
+    })
+
+
+@router.put(
+    "/{user_id}/profile/photo", response_model=ProfileRead,
+    summary="Subir o reemplazar mi foto de perfil",
+    description="multipart/form-data con el campo `foto` (JPG o PNG, hasta PHOTO_MAX_BYTES). Solo la propia cuenta. "
+    "El contenido se verifica por su firma, se reprocesa (sin EXIF ni ubicación) y se reduce a PHOTO_MAX_SIDE. "
+    "400 vacía, dañada o nombre engañoso; 413 demasiado grande; 415 no es JPG ni PNG.",
+)
+async def upload_photo(
+    user_id: UUID,
+    request: Request,
+    current_user: StoredUser = Depends(get_current_user),
+    service: UserService = Depends(get_user_service),
+) -> ProfileRead:
+    if current_user.id != user_id:  # before reading a single byte of the body
+        raise HTTPException(status_code=403, detail="not authorized to access this resource")
+    limit = service.photo_limits().max_bytes
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isdigit() and int(declared) > limit + MULTIPART_OVERHEAD:
+        raise HTTPException(status_code=413, detail="La imagen supera el tamaño máximo permitido.")
+    if not request.headers.get("content-type", "").lower().startswith("multipart/form-data"):
+        raise HTTPException(status_code=415, detail="Formato no permitido. Usa una imagen JPG o PNG.")
+    try:
+        form = await request.form(max_files=1, max_fields=2)
+    except HTTPException:
+        raise
+    except Exception as error:  # malformed multipart
+        raise HTTPException(status_code=400, detail="La solicitud no es válida.") from error
+    try:
+        upload = form.get(PHOTO_FIELD)
+        if not isinstance(upload, UploadFile):
+            raise HTTPException(status_code=400, detail="Falta la imagen.")
+        if upload.size is not None and upload.size > limit:
+            raise HTTPException(status_code=413, detail="La imagen supera el tamaño máximo permitido.")
+        data = await upload.read(limit + 1)
+        return await run_in_threadpool(
+            service.replace_photo, current_user, user_id,
+            filename=upload.filename, content_type=upload.content_type, data=data,
+        )
+    finally:
+        await form.close()
+
+
+@router.delete(
+    "/{user_id}/profile/photo", response_model=ProfileRead,
+    summary="Quitar mi foto de perfil",
+    description="Solo la propia cuenta. Idempotente. Borra el archivo; el perfil queda sin foto (foto_perfil null).",
+)
+def delete_photo(
+    user_id: UUID,
+    current_user: StoredUser = Depends(get_current_user),
+    service: UserService = Depends(get_user_service),
+) -> ProfileRead:
+    return service.remove_photo(current_user, user_id)
 
 
 @router.get("/{user_id}/profile", response_model=ProfileRead)

@@ -170,3 +170,25 @@ def get_internal_service_token() -> str | None:
     if token and len(token.encode("utf-8")) < 32:
         raise RuntimeError("INTERNAL_SERVICE_TOKEN must contain at least 32 bytes")
     return token or None
+
+
+@dataclass(frozen=True)
+class PhotoSettings:
+    """HU-61: where profile photos live and how big they may be."""
+
+    storage_path: str
+    max_bytes: int
+    max_side: int
+    max_pixels: int
+
+
+def get_photo_settings() -> PhotoSettings:
+    return PhotoSettings(
+        # Debe ser un volumen persistente (en Docker: users_photos): el contenedor se reconstruye en cada despliegue.
+        storage_path=os.getenv("PHOTO_STORAGE_PATH", "/data/profile-photos"),
+        max_bytes=_positive_int("PHOTO_MAX_BYTES", str(5 * 1024 * 1024)),
+        # Lado mayor tras reprocesar: la foto se reduce a este tamaño (nunca se agranda).
+        max_side=_positive_int("PHOTO_MAX_SIDE", "1024"),
+        # Tope de píxeles que se acepta decodificar (protege la memoria contra imágenes "bomba").
+        max_pixels=_positive_int("PHOTO_MAX_PIXELS", str(40_000_000)),
+    )
