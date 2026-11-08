@@ -50,6 +50,8 @@ def audit_db():
                 setup.execute((directory / "013_audit_fecha_timestamptz.sql").read_text())
             for _ in range(2):   # HU-47: who resolved a report, the note and the author of the reported content
                 setup.execute((directory / "014_reporte_revision_autor.sql").read_text())
+            for _ in range(2):   # HU-61: profile photo keys only
+                setup.execute((directory / "015_foto_perfil.sql").read_text())
             pool = ConnectionPool(dsn, kwargs={"options": f"-c search_path={schema}"}, min_size=1, max_size=4)
             pool.wait()
 

@@ -164,6 +164,19 @@ class MockUserRepository:
             self._locations.pop(user_id, None)
             return self._users.pop(user_id, None) is not None
 
+    def set_photo(self, user_id: UUID, key: str | None) -> tuple[bool, str | None]:
+        with self._lock:
+            user = self._users.get(user_id)
+            if user is None:
+                return False, None
+            previous = user.profile.foto_perfil
+            user.profile = user.profile.model_copy(update={"foto_perfil": key})
+            return True, previous
+
+    def photo_keys(self) -> set[str]:
+        with self._lock:
+            return {u.profile.foto_perfil for u in self._users.values() if u.profile.foto_perfil}
+
     def list_suggestion_candidates(
         self, *, exclude_user_id: UUID, limit: int, filters, origin, sports, fresh_since
     ) -> list[SuggestionCandidate]:

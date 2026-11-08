@@ -9,7 +9,11 @@ COPY app ./app
 RUN pip install --no-cache-dir .
 COPY db ./db
 RUN groupadd --system app \
-    && useradd --system --gid app --home-dir /nonexistent --no-create-home app
+    && useradd --system --gid app --home-dir /nonexistent --no-create-home app \
+    && mkdir -p /data/profile-photos \
+    && chown -R app:app /data
+# HU-61: fotos de perfil. En producción /data/profile-photos debe ser un volumen persistente (ver compose.yaml).
+ENV PHOTO_STORAGE_PATH=/data/profile-photos
 USER app
 EXPOSE 8001
 HEALTHCHECK --interval=10s --timeout=4s --start-period=10s --retries=5 \

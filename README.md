@@ -251,6 +251,50 @@ la zona del perfil, tanto para quien consulta como para cada candidato.
 - La migración `008_current_location.sql` crea `ubicacion_actual`; `python -m app.database.migrate` la aplica.
   **Sin ella, las sugerencias fallan** (la consulta la une): aplicarla antes de desplegar.
 
+## Foto de perfil (HU-61)
+
+La foto se guarda en el servidor y la URL queda en el perfil: se ve al volver a entrar, en la app y en la web.
+
+| Método | Ruta (por el gateway) | Qué hace |
+|---|---|---|
+| PUT | `/api/v1/users/{user_id}/profile/photo` | Sube o reemplaza **la propia** foto. `multipart/form-data`, campo `foto` (JPG o PNG). Responde el perfil con `foto_perfil`. |
+| DELETE | `/api/v1/users/{user_id}/profile/photo` | Quita la foto y borra el archivo (repetible). Responde el perfil con `foto_perfil: null`. |
+| GET | `/api/v1/users/photos/{clave}` | Entrega la imagen (sin sesión; ver «Privacidad»). `Content-Type` según la clave, `X-Content-Type-Options: nosniff`, CSP `default-src 'none'`. |
+
+- **Quién:** exige sesión (401) y solo la cuenta dueña (403; ni un administrador cambia la foto de otra persona). Una
+  cuenta suspendida (HU-45) recibe 403 `account_suspended` igual que en el resto de rutas.
+- **Validación (por el contenido, no por el nombre ni el `Content-Type` que declara el cliente):** la firma del archivo
+  debe ser JPEG (`FF D8 FF`) o PNG (`89 50 4E 47 0D 0A 1A 0A`) y debe decodificar completo. Errores, siempre con
+  `detail` en texto: **400** vacío, dañado, o doble extensión peligrosa (`foto.php.jpg`); **413** más de
+  `PHOTO_MAX_BYTES` o más de `PHOTO_MAX_PIXELS`; **415** no es JPG/PNG (firma, extensión final o tipo declarado).
+  Nunca 500 por un archivo malo.
+- **Reprocesado:** la imagen se reconstruye desde sus píxeles (se pierden EXIF, ubicación GPS, perfiles ICC, texto
+  incrustado y cualquier dato añadido al final), se aplica la rotación de la cámara y se reduce a `PHOTO_MAX_SIDE` px
+  por lado (nunca se agranda). Sale como JPG (calidad 85) o PNG, según la entrada.
+- **Almacenamiento:** el archivo se llama `<32 hex aleatorios>.jpg|png` (nunca el nombre original: sin path
+  traversal). `app/storage/photos.py` define la interfaz `PhotoStorage` (`save/read/delete/keys`); hoy la implementa
+  `LocalPhotoStorage` (carpeta `PHOTO_STORAGE_PATH`, escritura atómica). Para pasar a S3/GCS se escribe otra clase con
+  esos cuatro métodos y se entrega en `create_app(photo_storage=...)`; nada más cambia.
+- **Volumen persistente:** en `Ms_gateway/compose.yaml` la carpeta es el volumen Docker `users_photos`
+  (`/data/profile-photos`). Sin volumen, **las fotos se pierden cada vez que se reconstruye el contenedor**; no usar
+  `docker compose down -v` en producción. Respaldar el volumen junto con la base.
+- **Qué guarda la base:** `usuario.foto_perfil` guarda solo la clave. La API devuelve la ruta
+  `/api/v1/users/photos/<clave>` (o `null` sin foto). `PUT /{id}/profile` **ya no cambia la foto** (se ignora lo que
+  envíe el cliente en `foto_perfil`). La migración `015_foto_perfil.sql` deja en NULL los valores antiguos que no eran
+  una clave y agrega un CHECK (si el rol no es dueño de la tabla, solo avisa).
+- **Atomicidad:** primero se guarda el archivo nuevo, luego se cambia la columna (una sola sentencia que devuelve la
+  clave anterior) y recién entonces se borra el archivo anterior. Si falla el almacenamiento: 503 y el perfil sigue
+  con la foto anterior. Si falla la base: se borra el archivo nuevo. Si no se puede borrar el viejo, se registra y
+  `python -m app.storage.cleanup [--delete]` barre los archivos que ningún perfil usa. Al borrar la cuenta se limpia la
+  columna y se borra el archivo.
+- **Privacidad:** la URL solo aparece en respuestas que la persona ya puede ver (su perfil, tarjetas de deportistas,
+  sugerencias); las cuentas bloqueadas entre sí no se ven, y por eso tampoco su foto. La imagen se entrega sin sesión
+  porque `<Image>`/`<img>` no envían el token: la clave es aleatoria (128 bits), cambia con cada foto nueva y la foto
+  anterior deja de existir. Es una URL «con secreto»: quien la tenga puede abrirla.
+- **Variables:** `PHOTO_STORAGE_PATH` (por defecto `/data/profile-photos`), `PHOTO_MAX_BYTES` (5 MB),
+  `PHOTO_MAX_SIDE` (1024), `PHOTO_MAX_PIXELS` (40 000 000). En el gateway, `PHOTO_UPLOAD_MAX_BYTES` (6 MiB, el
+  tope del cuerpo de esa subida; el resto de las peticiones sigue en 1 MiB).
+
 ## Verificación de correo
 
 Una cuenta nueva queda **inactiva hasta verificar su correo**:

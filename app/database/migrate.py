@@ -22,6 +22,7 @@ MIGRATIONS = (
     "012_sanciones.sql",
     "013_audit_fecha_timestamptz.sql",
     "014_reporte_revision_autor.sql",
+    "015_foto_perfil.sql",
 )
 
 

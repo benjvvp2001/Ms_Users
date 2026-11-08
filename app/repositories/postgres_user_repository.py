@@ -441,12 +441,35 @@ class PostgresUserRepository:
                 # Keep notifications, memberships and payments consistent. An
                 # inactive account cannot log in or use previously issued JWTs.
                 cur.execute("DELETE FROM ubicacion_actual WHERE usuario_id = %s", (user_id,))
+                # The photo file is deleted by the service; the column must not keep pointing at it.
                 cur.execute(
-                    "UPDATE usuario SET is_active = FALSE, "
+                    "UPDATE usuario SET is_active = FALSE, foto_perfil = NULL, "
                     "fecha_actualizacion = CURRENT_TIMESTAMP "
                     "WHERE id = %s AND is_active = TRUE", (user_id,)
                 )
                 return cur.rowcount > 0
+
+    def set_photo(self, user_id: UUID, key: str | None) -> tuple[bool, str | None]:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                # One statement: lock the row, read the old key and write the new one, so two uploads at once
+                # cannot both think they replaced the same file.
+                cur.execute(
+                    """
+                    UPDATE usuario u SET foto_perfil = %s, fecha_actualizacion = CURRENT_TIMESTAMP
+                    FROM (SELECT id, foto_perfil FROM usuario WHERE id = %s AND is_active = TRUE FOR UPDATE) old
+                    WHERE u.id = old.id
+                    RETURNING old.foto_perfil
+                    """,
+                    (key, user_id),
+                )
+                row = cur.fetchone()
+        return (row is not None), (row[0] if row else None)
+
+    def photo_keys(self) -> set[str]:
+        with self._pool.connection() as conn:
+            rows = conn.execute("SELECT foto_perfil FROM usuario WHERE foto_perfil IS NOT NULL").fetchall()
+        return {row[0] for row in rows}
 
     def list_suggestion_candidates(
         self, *, exclude_user_id: UUID, limit: int, filters: SuggestionFilters,
