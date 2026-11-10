@@ -14,6 +14,7 @@ from psycopg_pool import ConnectionPool
 from app.repositories.base import (
     ATHLETE_ROLES,
     REPORT_TRANSITIONS,
+    BlockedPerson,
     InvalidReportTransitionError,
     SanctionConflictError,
     SanctionRecord,
@@ -613,6 +614,18 @@ class PostgresUserRepository:
                 "WHERE bloqueador_id = %s ORDER BY fecha_creacion DESC", (blocker_id,),
             ).fetchall()
         return [(row[0], row[1]) for row in rows]
+
+    def list_blocked_people(self, blocker_id: UUID, limit: int, offset: int = 0) -> list[BlockedPerson]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT u.id, u.nombre, u.apellido_paterno, u.foto_perfil, b.fecha_creacion "
+                "FROM bloqueo_usuario b JOIN usuario u ON u.id = b.bloqueado_id AND u.is_active = TRUE "
+                "WHERE b.bloqueador_id = %s "
+                "ORDER BY b.fecha_creacion DESC, b.bloqueado_id LIMIT %s OFFSET %s",
+                (blocker_id, limit, offset),
+            ).fetchall()
+        return [BlockedPerson(user_id=row[0], nombre=row[1], apellido_paterno=row[2], foto_perfil=row[3],
+                              fecha_bloqueo=row[4]) for row in rows]
 
     def create_report(self, reporter_id: UUID, report: ReportCreate, reporter_role: str) -> ReportRecord | None:
         with self._pool.connection() as conn:
