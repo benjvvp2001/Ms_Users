@@ -11,6 +11,7 @@ from app.repositories.base import (
     ATHLETE_ROLES,
     REPORT_TRANSITIONS,
     AuditEvent,
+    BlockedPerson,
     InvalidReportTransitionError,
     SanctionConflictError,
     SanctionRecord,
@@ -395,6 +396,16 @@ class MockUserRepository:
         with self._lock:
             rows = [(blocked, at) for (blocker, blocked), at in self._blocks.items() if blocker == blocker_id]
         return sorted(rows, key=lambda row: row[1], reverse=True)
+
+    def list_blocked_people(self, blocker_id: UUID, limit: int, offset: int = 0) -> list[BlockedPerson]:
+        with self._lock:
+            rows = [(blocked, at) for (blocker, blocked), at in self._blocks.items()
+                    if blocker == blocker_id and blocked in self._users]
+            rows.sort(key=lambda row: (-row[1].timestamp(), str(row[0])))
+            return [BlockedPerson(user_id=blocked, nombre=self._users[blocked].profile.nombre,
+                                  apellido_paterno=self._users[blocked].profile.apellido_paterno,
+                                  foto_perfil=self._users[blocked].profile.foto_perfil, fecha_bloqueo=at)
+                    for blocked, at in rows[offset:offset + limit]]
 
     def create_report(self, reporter_id: UUID, report: ReportCreate, reporter_role: str) -> ReportRecord | None:
         with self._lock:

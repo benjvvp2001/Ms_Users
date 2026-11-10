@@ -45,6 +45,17 @@ class LocationRecord:
     actualizada_en: datetime
 
 
+@dataclass(frozen=True)
+class BlockedPerson:
+    """HU-66: one row of the block list. Only what the list shows (no email, rut or phone)."""
+
+    user_id: UUID
+    nombre: str
+    apellido_paterno: str
+    foto_perfil: str | None
+    fecha_bloqueo: datetime
+
+
 # HU-47. Un reporte pendiente se resuelve de tres formas; uno "revisado" aun puede escalarse a sancion.
 # "descartado" y "escalado" son finales aqui (la sancion la sigue HU-45). Repetir el estado actual no es un cambio.
 REPORT_TRANSITIONS: dict[str, tuple[str, ...]] = {
@@ -337,6 +348,11 @@ class UserRepository(Protocol):
 
     def list_blocked(self, blocker_id: UUID) -> list[tuple[UUID, datetime]]:
         """(blocked user, blocked at), newest first."""
+        ...
+
+    def list_blocked_people(self, blocker_id: UUID, limit: int, offset: int = 0) -> list[BlockedPerson]:
+        """HU-66: one page of the people `blocker_id` blocked, newest block first (ties by id). Accounts that
+        no longer exist (deleted) are left out in the same query, so every page is full."""
         ...
 
     def create_report(self, reporter_id: UUID, report: ReportCreate, reporter_role: str) -> ReportRecord | None:
