@@ -12,6 +12,7 @@ from app.repositories.base import StoredUser
 from app.schemas.audit import AuditPage, AuditQuery
 from app.schemas.sanction import SanctionCreate, SanctionLift, SanctionListQuery, SanctionRead
 from app.schemas.user import (
+    BLOCK_LIST_MAX,
     BlockCheck,
     BlockCreate,
     BlockedUser,
@@ -166,10 +167,12 @@ def athlete_cards(
 
 @router.get("/me/blocks", response_model=list[BlockedUser])
 def list_blocked(
+    limit: Annotated[int, Query(ge=1, le=BLOCK_LIST_MAX)] = BLOCK_LIST_MAX,
+    offset: Annotated[int, Query(ge=0)] = 0,
     current_user: StoredUser = Depends(get_current_user),
     service: UserService = Depends(get_user_service),
 ) -> list[BlockedUser]:
-    return service.list_blocked(current_user)
+    return service.list_blocked(current_user, limit, offset)
 
 
 @router.put("/me/blocks/{user_id}", status_code=status.HTTP_204_NO_CONTENT,
@@ -218,12 +221,15 @@ def unblock_by_path(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.get("/blocks/me", response_model=list[BlockedUser], summary="Personas que he bloqueado")
+@router.get("/blocks/me", response_model=list[BlockedUser], summary="Personas que he bloqueado",
+            description="HU-66. Solo la lista propia, la más reciente primero, de a `limit` (máximo 100) desde `offset`.")
 def my_blocks(
+    limit: Annotated[int, Query(ge=1, le=BLOCK_LIST_MAX)] = BLOCK_LIST_MAX,
+    offset: Annotated[int, Query(ge=0)] = 0,
     current_user: StoredUser = Depends(get_current_user),
     service: UserService = Depends(get_user_service),
 ) -> list[BlockedUser]:
-    return service.list_blocked(current_user)
+    return service.list_blocked(current_user, limit, offset)
 
 
 @router.get("/blocks/check", response_model=BlockCheck,

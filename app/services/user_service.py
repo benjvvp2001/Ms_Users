@@ -23,6 +23,7 @@ from app.core.security import (
 )
 from app.repositories.base import (
     ATHLETE_ROLES,
+    BlockedPerson,
     InvalidReportTransitionError,
     LocationRecord,
     NewEmailVerification,
@@ -33,6 +34,7 @@ from app.repositories.base import (
 )
 from app.schemas.user import (
     AuthenticatedUser,
+    BLOCK_LIST_MAX,
     BlockCheck,
     BlockedUser,
     ChatPreferences,
@@ -594,13 +596,18 @@ class UserService:
         self._repository.record_audit(user_id=current_user.id, action="unblock_user",
                                       resource=f"users/{user_id}", result="success")
 
-    def list_blocked(self, current_user: StoredUser) -> list[BlockedUser]:
-        blocked = []
-        for user_id, blocked_at in self._repository.list_blocked(current_user.id):
-            user = self._repository.get_user(user_id)
-            if user is not None:
-                blocked.append(BlockedUser(**self._as_public(user).model_dump(), fecha_bloqueo=blocked_at))
-        return blocked
+    def list_blocked(self, current_user: StoredUser, limit: int = BLOCK_LIST_MAX, offset: int = 0) -> list[BlockedUser]:
+        """HU-66: one page of the people the caller blocked, newest first. Only the caller's own list exists:
+        the id comes from the token, never from the request. A person who deleted their account is not listed
+        (their block no longer matters: that account cannot be reached again); a suspended one is listed like
+        any other, with nothing that says so."""
+        limit = max(1, min(limit, BLOCK_LIST_MAX))
+        return [
+            BlockedUser(user_id=person.user_id, nombre=person.nombre,
+                        apellido_inicial=f"{person.apellido_paterno[:1].upper()}.",
+                        foto_perfil=photo_url(person.foto_perfil), fecha_bloqueo=person.fecha_bloqueo)
+            for person in self._repository.list_blocked_people(current_user.id, limit, max(0, offset))
+        ]
 
     # -- muted people (chat preferences) -------------------------------------------
 

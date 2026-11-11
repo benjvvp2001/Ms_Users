@@ -201,7 +201,7 @@ agrega los silencios. Todas las rutas requieren sesión.
 |---|---|---|
 | POST | `/block` | `{"blockedUserId": "uuid"}`. `201` con la persona bloqueada; `200` si ya lo estaba (conserva la fecha). También acepta `blocked_user_id`. |
 | DELETE | `/block/{id}` | Desbloquea. `204` siempre (idempotente). |
-| GET | `/blocks/me` | Las personas que bloqueé, la más reciente primero. |
+| GET | `/blocks/me?limit=&offset=` | Las personas que bloqueé, la más reciente primero, de a `limit` (1–100, por defecto 100) desde `offset` (HU-66). |
 | GET | `/blocks/check?userA=…&userB=…` | `{"blocked": true/false}`: si alguna de las dos bloqueó a la otra. Para que otros servicios lo consulten. |
 | GET | `/chat-preferences` | Las personas que silencié: `{"muted_users": [...]}`. |
 | PATCH | `/chat-preferences` | `{"muteUserIds": [...], "unmuteUserIds": [...]}` (hasta 100 cada una, sin repetir ni cruzarse). Todo o nada. |
@@ -224,6 +224,28 @@ bloqueo, así que quien lo use debe mostrar un mensaje genérico («no disponibl
 solo se guarda la lista (`silencio_usuario`, privada: la persona silenciada no se entera). Desde la
 interfaz un silencio de una conversación directa equivale a silenciar a esa persona. Que la lista apague
 las notificaciones depende de que quien las envía (el gateway) la consulte.
+
+### Ver y desbloquear a las personas bloqueadas (HU-66)
+
+No hay endpoints ni migración nuevos: la lista (`GET /blocks/me`, o `/me/blocks`) y el desbloqueo
+(`DELETE /block/{id}`, o `/me/blocks/{id}`) son los de la HU-51/HU-59. La HU-66 los completó:
+
+- **Solo la lista propia.** El dueño sale del token; ningún parámetro cambia de quién es la lista. La persona
+  bloqueada no ve nada (su lista sale vacía) y, para ella, la tarjeta de quien la bloqueó responde 404, igual que
+  una cuenta que no existe.
+- **Qué devuelve cada fila:** `user_id`, `nombre`, `apellido_inicial` (solo la inicial), `foto_perfil` (la ruta
+  del gateway de la HU-61, o `null` si no tiene foto) y `fecha_bloqueo`. Nunca correo, RUT, teléfono ni apellido completo.
+- **Paginada:** `limit` de 1 a 100 (por defecto 100, para que la app que carga todo siga igual) y `offset`;
+  más reciente primero y, si dos bloqueos tienen la misma fecha, por id, así que las páginas no se repiten ni se saltan.
+  Fuera de rango responde 422. Es una sola consulta SQL, sin una consulta por persona.
+- **Cuenta eliminada** (`is_active=false`): no aparece en la lista y no ocupa lugar en las páginas. Su bloqueo
+  queda guardado pero ya no importa: esa cuenta no vuelve a entrar. Desbloquearla sigue respondiendo 204.
+- **Cuenta suspendida (HU-45):** aparece como cualquier otra, sin ninguna marca de que está suspendida; así
+  quien la bloqueó la puede desbloquear.
+- **Desbloquear:** `204` siempre; borra solo el bloqueo de quien llama hacia esa persona (si el otro también la
+  bloqueó, ese bloqueo sigue). Se restablece lo que el bloqueo cortó (aparecer en Descubrir y en las sugerencias, poder
+  pedirse match y escribirse en el chat existente, con su historial intacto); no se restablece nada
+  que el bloqueo no haya quitado (mensajes o chats que alguien haya borrado, silencios). No cambia ninguna regla de la HU-59.
 
 La migración `007_chat_mutes.sql` crea `silencio_usuario`; `python -m app.database.migrate` (y `users_migrate`
 en Compose) la aplica junto con las anteriores.

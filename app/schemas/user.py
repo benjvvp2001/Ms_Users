@@ -329,6 +329,10 @@ class BlockedUser(PublicAthlete):
     fecha_bloqueo: datetime
 
 
+# HU-66: the most people one page of the block list can hold.
+BLOCK_LIST_MAX = 100
+
+
 class CamelAPIModel(APIModel):
     """Input that arrives in camelCase (the HU-51 contract); snake_case is accepted too."""
 
