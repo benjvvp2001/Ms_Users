@@ -5,6 +5,7 @@ from uuid import UUID
 
 from fastapi import BackgroundTasks, HTTPException, status
 
+from app.services.entitlements_client import EntitlementsClient, es_destacado
 from app.core.config import get_email_settings, get_settings
 from app.services.content_authors import ContentAuthors
 from app.core.config import EmailSettings, LocationSettings, PhotoSettings, get_location_settings, get_photo_settings
@@ -108,7 +109,10 @@ class UserService:
         self, repository: UserRepository, email_sender: EmailSender | None = None,
         location: LocationSettings | None = None, content_authors: ContentAuthors | None = None,
         photo_storage: PhotoStorage | None = None, photo_settings: PhotoSettings | None = None,
+        entitlements: EntitlementsClient | None = None,
     ) -> None:
+        # HU-54: ms-pago, to feature athletes with a paid plan in suggestions; optional.
+        self._entitlements = entitlements
         self._photo_storage = photo_storage
         self._photo_settings = photo_settings
         self._repository = repository
@@ -505,6 +509,10 @@ class UserService:
             origin=origin, sports=current_user.preferences.deportes, fresh_since=fresh_since,
         )
         ranked = [self._as_suggestion(candidate, current_user.preferences.deportes) for candidate in candidates]
+        if self._entitlements is not None and ranked:
+            planes = self._entitlements.many("usuario", [s.user_id for s in ranked])
+            ranked = [s.model_copy(update={"es_destacado": es_destacado(planes.get(s.user_id))}) for s in ranked]
+            ranked.sort(key=lambda s: not s.es_destacado)  # stable: compatibility order kept inside each group
         self._repository.record_audit(
             user_id=current_user.id,
             action="list_suggestions",

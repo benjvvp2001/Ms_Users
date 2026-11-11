@@ -153,6 +153,7 @@ def test_cards_expose_only_public_fields() -> None:
         "compatibilidad",
         "distancia_km",
         "nivel_coincidente",
+        "es_destacado",  # HU-54: paid plan in force (public, like a badge)
     }
     assert "diego@example.com" not in str(card)
     assert "12345678" not in str(card)
