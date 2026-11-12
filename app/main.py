@@ -21,8 +21,6 @@ from app.repositories.base import DependencyUnavailableError, UserRepository
 from app.repositories.postgres_user_repository import PostgresUserRepository
 from app.services.content_authors import ContentAuthors, InternalContentAuthors
 from app.services.email_sender import EmailSender
-from app.services.sanction_service import AccountSuspendedError
-from app.storage.photos import LocalPhotoStorage, PhotoStorage
 
 
 def _finite_or_text(value: float):
@@ -36,8 +34,7 @@ _NO_ECHO_PREFIXES = ("/api/v1/users/admin/audit-events", "/api/v1/users/admin/re
 
 
 def create_app(
-    repository: UserRepository | None = None, email_sender: EmailSender | None = None,
-    content_authors: ContentAuthors | None = None, photo_storage: PhotoStorage | None = None,
+    repository: UserRepository | None = None, email_sender: EmailSender | None = None
 ) -> FastAPI:
     """Create the service without routes outside the approved users prefix.
 
@@ -57,14 +54,11 @@ def create_app(
             pool = create_pool(get_database_url())
             pool_holder["pool"] = pool
             app.state.repository = PostgresUserRepository(pool)
-        if content_authors is None:
-            # HU-47: who made a reported activity (Ms_Activities) or message (Ms_Matching), over the internal network.
-            settings = get_content_author_settings()
-            app.state.content_authors = InternalContentAuthors(
-                settings.activities_url, settings.matching_url, os.getenv("INTERNAL_SERVICE_TOKEN"), settings.timeout_seconds)
         try:
             yield
         finally:
+            if own_entitlements is not None:
+                own_entitlements.close()
             pool = pool_holder.get("pool")
             if pool is not None:
                 pool.close()  # type: ignore[attr-defined]
@@ -78,10 +72,6 @@ def create_app(
     )
     if repository is not None:
         app.state.repository = repository
-    if content_authors is not None:
-        app.state.content_authors = content_authors
-    # HU-61: profile photos. A folder on a persistent volume by default; another PhotoStorage can be injected.
-    app.state.photo_storage = photo_storage or LocalPhotoStorage(get_photo_settings().storage_path)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request: Request, error: RequestValidationError) -> JSONResponse:

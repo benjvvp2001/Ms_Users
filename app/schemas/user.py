@@ -295,6 +295,8 @@ class SuggestedUser(APIModel):
     compatibilidad: int = Field(ge=0, le=100)
     distancia_km: float | None = None
     nivel_coincidente: bool = False
+    # HU-54: the athlete has a paid plan in force (ms-pago); featured ones are listed first.
+    es_destacado: bool = False
 
 
 class RoleRead(APIModel):
