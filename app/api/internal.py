@@ -19,6 +19,7 @@ from app.schemas.audit import AdminAuditEntry
 from app.schemas.sanction import AccountStatus
 from app.services.audit_service import AuditService
 from app.services.sanction_service import SanctionService
+from app.storage.photos import photo_url
 
 router = APIRouter(prefix="/internal/v1/audit", tags=["internal"], include_in_schema=False)
 
@@ -84,3 +85,24 @@ def account_names(
         if user is not None and user.profile is not None:
             names[user_id] = f"{user.profile.nombre} {user.profile.apellido_paterno[:1].upper()}.".strip()
     return AccountNames(names=names)
+
+
+class AccountPhotos(BaseModel):
+    photos: dict[UUID, str]
+
+
+@accounts_router.post("/photos", response_model=AccountPhotos, dependencies=[Depends(require_internal_service)])
+def account_photos(
+    payload: AccountNamesRequest, repository: UserRepository = Depends(get_repository)
+) -> AccountPhotos:
+    """HU-61: the CURRENT profile photo of each account, in one request, for ms-club's candidate list (its copy from
+    the day the person applied points to a file that is deleted when the photo is replaced). Only the photo path:
+    nothing else about the person. Unknown or deleted accounts, people without a photo, and any stored value that
+    is not a photo this service generated are left out."""
+    photos: dict[UUID, str] = {}
+    for user_id in dict.fromkeys(payload.ids):
+        user = repository.get_user(user_id)
+        url = photo_url(user.profile.foto_perfil) if user is not None and user.profile is not None else None
+        if url is not None:
+            photos[user_id] = url
+    return AccountPhotos(photos=photos)

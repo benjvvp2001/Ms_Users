@@ -109,8 +109,14 @@ class UserService:
 
     def __init__(
         self, repository: UserRepository, email_sender: EmailSender | None = None,
-        location: LocationSettings | None = None,
+        location: LocationSettings | None = None, content_authors: ContentAuthors | None = None,
+        photo_storage: PhotoStorage | None = None, photo_settings: PhotoSettings | None = None,
+        entitlements: EntitlementsClient | None = None,
     ) -> None:
+        # HU-54: ms-pago, to feature athletes with a paid plan in suggestions; optional.
+        self._entitlements = entitlements
+        self._photo_storage = photo_storage
+        self._photo_settings = photo_settings
         self._repository = repository
         self._email_sender = email_sender
         self._location = location or get_location_settings()
