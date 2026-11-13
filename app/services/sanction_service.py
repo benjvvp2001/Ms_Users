@@ -67,6 +67,11 @@ def ensure_not_suspended(repository: UserRepository, user_id: UUID) -> None:
         raise AccountSuspendedError(sanction.tipo, sanction.motivo, sanction.fin)
 
 
+def is_suspended(repository: UserRepository, user_id: UUID) -> bool:
+    """True while the account has a sanction in force (used to leave it out of what is offered to others)."""
+    return repository.get_active_sanction(user_id, utcnow()) is not None
+
+
 class SanctionService:
     def __init__(self, repository: UserRepository, email_sender: EmailSender | None = None) -> None:
         self._repository = repository

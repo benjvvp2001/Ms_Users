@@ -31,6 +31,9 @@ WITH mine AS (
     WHERE u.is_active=TRUE AND u.id<>%(user_id)s AND r.nombre=ANY(%(roles)s)
       AND (ev.usuario_id IS NULL OR ev.verified_at IS NOT NULL)
       AND COALESCE(pref.disponibilidad_match, TRUE)
+      -- HU-45: an account with a sanction in force (suspended) is offered to nobody.
+      AND NOT EXISTS (SELECT 1 FROM sancion sa
+                      WHERE sa.usuario_id=u.id AND sa.estado='activa' AND (sa.fin IS NULL OR sa.fin > now()))
       -- A block hides both people from each other, whoever blocked whom.
       AND NOT EXISTS (SELECT 1 FROM bloqueo_usuario b
                       WHERE (b.bloqueador_id=%(user_id)s AND b.bloqueado_id=u.id)

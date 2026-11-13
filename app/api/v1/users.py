@@ -3,12 +3,15 @@ from __future__ import annotations
 from uuid import UUID
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, Header, HTTPException, Query, Request, Response, status
+from fastapi.security import HTTPAuthorizationCredentials
 from starlette.datastructures import UploadFile
 from starlette.concurrency import run_in_threadpool
 
-from app.api.dependencies import get_audit_service, get_current_user, get_sanction_service, get_user_service
-from app.repositories.base import StoredUser
+from app.api.dependencies import (bearer_scheme, get_audit_service, get_current_user, get_repository,
+                                  get_sanction_service, get_user_service)
+from app.api.internal import require_internal_service
+from app.repositories.base import StoredUser, UserRepository
 from app.schemas.audit import AuditPage, AuditQuery
 from app.schemas.sanction import SanctionCreate, SanctionLift, SanctionListQuery, SanctionRead
 from app.schemas.user import (
@@ -234,15 +237,21 @@ def my_blocks(
 
 @router.get("/blocks/check", response_model=BlockCheck,
             summary="¿Hay un bloqueo entre dos personas? (para otros servicios)",
-            description="Solo lo puede consultar una de las dos personas (con su token) o un administrador. "
+            description="Solo un administrador (con su token) o otro servicio (con X-Internal-Service-Token). "
+            "Ni siquiera las dos personas involucradas: la bloqueada se enteraría. "
             "Responde si existe un bloqueo, nunca quién lo puso.")
 def check_blocks(
     user_a: Annotated[UUID, Query(alias="userA")],
     user_b: Annotated[UUID, Query(alias="userB")],
-    current_user: StoredUser = Depends(get_current_user),
+    x_internal_service_token: Annotated[str | None, Header(max_length=256)] = None,
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    repository: UserRepository = Depends(get_repository),
     service: UserService = Depends(get_user_service),
 ) -> BlockCheck:
-    return service.check_block(current_user, user_a, user_b)
+    if x_internal_service_token is not None:
+        require_internal_service(x_internal_service_token)
+        return service.check_block(None, user_a, user_b)
+    return service.check_block(get_current_user(credentials, repository), user_a, user_b)
 
 
 @router.get("/chat-preferences", response_model=ChatPreferences, summary="Personas silenciadas")

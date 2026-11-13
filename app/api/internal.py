@@ -14,11 +14,12 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.api.dependencies import get_sanction_service
+from app.api.dependencies import get_sanction_service, get_user_service
 from app.schemas.audit import AdminAuditEntry
 from app.schemas.sanction import AccountStatus
 from app.services.audit_service import AuditService
 from app.services.sanction_service import SanctionService
+from app.services.user_service import UserService
 from app.storage.photos import photo_url
 
 router = APIRouter(prefix="/internal/v1/audit", tags=["internal"], include_in_schema=False)
@@ -85,6 +86,20 @@ def account_names(
         if user is not None and user.profile is not None:
             names[user_id] = f"{user.profile.nombre} {user.profile.apellido_paterno[:1].upper()}.".strip()
     return AccountNames(names=names)
+
+
+class ContactableIds(BaseModel):
+    ids: list[UUID]
+
+
+@accounts_router.post("/{user_id}/contactable", response_model=ContactableIds,
+                      dependencies=[Depends(require_internal_service)])
+def contactable_accounts(user_id: UUID, payload: AccountNamesRequest,
+                         service: UserService = Depends(get_user_service)) -> ContactableIds:
+    """Which of these accounts can `user_id` still talk to: active verified athletes, not blocked in either direction
+    and not suspended. ms-machine uses it so the unread total only counts the chats the person can see in their list.
+    Only ids come back, and only ones the caller already sent."""
+    return ContactableIds(ids=service.contactable_ids(user_id, payload.ids))
 
 
 class AccountPhotos(BaseModel):

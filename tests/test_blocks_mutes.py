@@ -138,42 +138,65 @@ def test_unblocking_restores_everything_and_a_block_in_either_direction_is_enoug
 # -- the check other services use ---------------------------------------------------------------------------------
 
 
+SERVICE_TOKEN = "service-token-for-tests-at-least-32-bytes-long"
+
+
 def check(client, who, a, b):
     return client.get(f"{USERS}/blocks/check", headers=who["headers"], params={"userA": a["id"], "userB": b["id"]})
 
 
-def test_check_reports_a_block_in_either_direction_and_never_who_placed_it():
+def check_as_service(client, a, b, token=SERVICE_TOKEN):
+    return client.get(f"{USERS}/blocks/check", headers={"X-Internal-Service-Token": token},
+                      params={"userA": a["id"], "userB": b["id"]})
+
+
+def test_check_reports_a_block_in_either_direction_and_never_who_placed_it(monkeypatch):
+    monkeypatch.setenv("INTERNAL_SERVICE_TOKEN", SERVICE_TOKEN)
     client, _, ana, beto, carla = trio()
-    assert check(client, ana, ana, beto).json() == {"blocked": False}
+    assert check_as_service(client, ana, beto).json() == {"blocked": False}
     client.post(f"{USERS}/block", headers=ana["headers"], json={"blockedUserId": beto["id"]})
-    for who in (ana, beto):  # either of the two can ask
-        for a, b in ((ana, beto), (beto, ana)):
-            response = check(client, who, a, b)
-            assert response.status_code == 200 and response.json() == {"blocked": True}
-    assert check(client, ana, ana, carla).json() == {"blocked": False}
+    for a, b in ((ana, beto), (beto, ana)):
+        response = check_as_service(client, a, b)
+        assert response.status_code == 200 and response.json() == {"blocked": True}
+    assert check_as_service(client, ana, carla).json() == {"blocked": False}
     client.delete(f"{USERS}/block/{beto['id']}", headers=ana["headers"])
-    assert check(client, ana, ana, beto).json() == {"blocked": False}
+    assert check_as_service(client, ana, beto).json() == {"blocked": False}
 
 
-def test_check_is_only_for_the_people_involved_or_an_admin():
+def test_a_person_cannot_find_out_that_someone_blocked_them(monkeypatch):
+    """Antes cualquiera de las dos personas podía preguntar y así la bloqueada descubría el bloqueo."""
+    monkeypatch.setenv("INTERNAL_SERVICE_TOKEN", SERVICE_TOKEN)
+    client, _, ana, beto, carla = trio()
+    client.post(f"{USERS}/block", headers=ana["headers"], json={"blockedUserId": beto["id"]})
+    for who in (ana, beto, carla):  # ni la que bloqueó, ni la bloqueada, ni un tercero
+        response = check(client, who, ana, beto)
+        assert response.status_code == 403
+        assert "blocked" not in response.json()
+
+
+def test_check_is_only_for_an_admin_or_an_internal_service(monkeypatch):
+    monkeypatch.setenv("INTERNAL_SERVICE_TOKEN", SERVICE_TOKEN)
     client, repository, ana, beto, carla = trio()
     client.post(f"{USERS}/block", headers=ana["headers"], json={"blockedUserId": beto["id"]})
-    outsider = check(client, carla, ana, beto)  # Carla cannot map who blocked whom
-    assert outsider.status_code == 403
-    assert outsider.json() == {"detail": "Solo puedes consultar bloqueos en los que participas."}
     repository.get_user_by_email("carla@example.com").role = "admin"
     admin = check(client, carla, ana, beto)
     assert admin.status_code == 200 and admin.json() == {"blocked": True}
+    assert check_as_service(client, ana, beto).json() == {"blocked": True}
+    assert check_as_service(client, ana, beto, token="x" * 40).status_code == 401  # secreto equivocado
+    monkeypatch.delenv("INTERNAL_SERVICE_TOKEN")
+    assert check_as_service(client, ana, beto).status_code == 503  # sin secreto configurado: cerrado
 
 
-def test_check_validates_its_parameters_and_needs_a_session():
+def test_check_validates_its_parameters_and_needs_a_session(monkeypatch):
+    monkeypatch.setenv("INTERNAL_SERVICE_TOKEN", SERVICE_TOKEN)
     client, _, ana, beto, _ = trio()
     path = f"{USERS}/blocks/check"
-    assert client.get(path, headers=ana["headers"]).status_code == 422
-    assert client.get(path, headers=ana["headers"], params={"userA": ana["id"]}).status_code == 422
-    assert client.get(path, headers=ana["headers"], params={"userA": ana["id"], "userB": "no-es-uuid"}).status_code == 422
+    service = {"X-Internal-Service-Token": SERVICE_TOKEN}
+    assert client.get(path, headers=service).status_code == 422
+    assert client.get(path, headers=service, params={"userA": ana["id"]}).status_code == 422
+    assert client.get(path, headers=service, params={"userA": ana["id"], "userB": "no-es-uuid"}).status_code == 422
     assert client.get(path, params={"userA": ana["id"], "userB": beto["id"]}).status_code == 401
-    assert check(client, ana, ana, ana).json() == {"blocked": False}  # a person is never blocked from themselves
+    assert check_as_service(client, ana, ana).json() == {"blocked": False}  # a person is never blocked from themselves
 
 
 # -- muting -------------------------------------------------------------------------------------------------------
@@ -256,11 +279,12 @@ def test_muted_people_are_private_and_need_a_session():
     assert client.patch(f"{USERS}/chat-preferences", json={"muteUserIds": [beto["id"]]}).status_code == 401
 
 
-def test_muting_is_not_blocking():
+def test_muting_is_not_blocking(monkeypatch):
+    monkeypatch.setenv("INTERNAL_SERVICE_TOKEN", SERVICE_TOKEN)
     client, _, ana, beto, _ = trio()
     client.patch(f"{USERS}/chat-preferences", headers=ana["headers"], json={"muteUserIds": [beto["id"]]})
     assert card(client, ana, beto).status_code == 200 and card(client, beto, ana).status_code == 200
-    assert check(client, ana, ana, beto).json() == {"blocked": False}
+    assert check_as_service(client, ana, beto).json() == {"blocked": False}
     assert client.get(f"{USERS}/blocks/me", headers=ana["headers"]).json() == []
     # and the two lists are independent
     client.post(f"{USERS}/block", headers=ana["headers"], json={"blockedUserId": beto["id"]})

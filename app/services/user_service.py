@@ -67,7 +67,7 @@ from app.schemas.user import (
     UserSport,
 )
 from app.core.recommendations import compatibility, distance_km, similar_level
-from app.services.sanction_service import AccountSuspendedError, ensure_not_suspended
+from app.services.sanction_service import AccountSuspendedError, ensure_not_suspended, is_suspended
 from app.services.email_sender import (
     EmailSender,
     deliver_safely,
@@ -475,20 +475,13 @@ class UserService:
     def athlete_cards(self, current_user: StoredUser, user_ids: list[UUID]) -> list[SuggestedUser]:
         """Public directory for matching, including profiles outside the suggestions window.
 
-        A person with a block against the caller (either way) is left out, exactly like a deactivated
-        account. Matching and Activities ask for this card before any request, message or listing, so
+        A person with a block against the caller (either way), or with a sanction in force (HU-45), is left out,
+        exactly like a deactivated account. Matching and Activities ask for this card before any request, message or listing, so
         this is what stops two people who blocked each other from reaching each other."""
         if current_user.role not in ATHLETE_ROLES or not current_user.email_verified:
             raise HTTPException(status_code=403, detail="Solo deportistas verificados pueden hacer match.")
         cards = []
-        ids = list(dict.fromkeys(user_ids))
-        blocked = self._repository.blocked_with(current_user.id, ids)
-        for user_id in ids:
-            if user_id in blocked:
-                continue
-            user = self._repository.get_user(user_id)
-            if user is None or user.role not in ATHLETE_ROLES or not user.email_verified:
-                continue
+        for user in self._contactable_athletes(current_user.id, user_ids):
             cards.append(self._as_suggestion(SuggestionCandidate(
                 id=user.id, nombre=user.profile.nombre,
                 apellido_paterno=user.profile.apellido_paterno,
@@ -497,6 +490,27 @@ class UserService:
                 deportes=user.preferences.deportes,
             ), current_user.preferences.deportes))
         return cards
+
+    def _contactable_athletes(self, viewer_id: UUID, user_ids: list[UUID]) -> list[StoredUser]:
+        """The verified, active athletes among `user_ids` that `viewer_id` may see: not blocked either way and not
+        suspended (HU-45). The single rule behind the athlete cards and the unread count of the chat."""
+        ids = list(dict.fromkeys(user_ids))
+        blocked = self._repository.blocked_with(viewer_id, ids)
+        found = []
+        for user_id in ids:
+            if user_id in blocked:
+                continue
+            user = self._repository.get_user(user_id)
+            if user is None or user.role not in ATHLETE_ROLES or not user.email_verified:
+                continue
+            if is_suspended(self._repository, user.id):
+                continue
+            found.append(user)
+        return found
+
+    def contactable_ids(self, viewer_id: UUID, user_ids: list[UUID]) -> list[UUID]:
+        """Internal: which of `user_ids` can `viewer_id` still talk to (see _contactable_athletes)."""
+        return [user.id for user in self._contactable_athletes(viewer_id, user_ids)]
 
     def list_suggestions(self, current_user: StoredUser, limit: int, filters: SuggestionFilters | None = None) -> list[SuggestedUser]:
         filters = filters or SuggestionFilters(limit=limit)
@@ -583,12 +597,13 @@ class UserService:
         blocked_at = dict(self._repository.list_blocked(current_user.id))[user_id]
         return BlockedUser(**self._as_public(self._get_user_or_404(user_id)).model_dump(), fecha_bloqueo=blocked_at)
 
-    def check_block(self, current_user: StoredUser, user_a: UUID, user_b: UUID) -> BlockCheck:
+    def check_block(self, current_user: StoredUser | None, user_a: UUID, user_b: UUID) -> BlockCheck:
         """For other services to ask before letting two people interact. It only answers whether a block
-        exists, never who placed it, and only to one of the two people (or an admin): anyone else could
-        otherwise map who blocked whom."""
-        if current_user.role != "admin" and current_user.id not in (user_a, user_b):
-            raise HTTPException(403, "Solo puedes consultar bloqueos en los que participas.")
+        exists, never who placed it, and only to an admin (current_user) or to another service
+        (current_user None, already authenticated with X-Internal-Service-Token). Not even the two people
+        involved: the blocked one would learn that someone blocked them."""
+        if current_user is not None and current_user.role != "admin":
+            raise HTTPException(403, "Solo un administrador o un servicio interno puede consultar bloqueos.")
         return BlockCheck(blocked=user_a != user_b and self._repository.blocked_between(user_a, user_b))
 
     def unblock(self, current_user: StoredUser, user_id: UUID) -> None:

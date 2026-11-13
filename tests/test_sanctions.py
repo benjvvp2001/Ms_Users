@@ -374,3 +374,34 @@ def test_there_are_no_delete_or_edit_routes_for_sanctions() -> None:
     for method in ("put", "patch", "delete"):
         for path in (SANCTIONS, f"{SANCTIONS}/{created['id']}", f"{SANCTIONS}/{created['id']}/lift"):
             assert getattr(client, method)(path, headers=admin["headers"]).status_code in (404, 405), (method, path)
+
+
+# -- una cuenta suspendida no se ofrece a nadie ---------------------------------------------------
+
+
+def ids_of(response):
+    assert response.status_code == 200, response.text
+    return {card["user_id"] for card in response.json()}
+
+
+def test_a_suspended_account_leaves_the_suggestions_and_the_athlete_cards(clock):
+    client, _, admin, ana, beto = world()
+    cards = lambda: client.post(f"{USERS}/athletes/cards", headers=ana["headers"], json=[beto["id"]])  # noqa: E731
+    assert beto["id"] in ids_of(client.get(f"{USERS}/suggestions", headers=ana["headers"]))
+    assert ids_of(cards()) == {beto["id"]}
+    created = sanction(client, admin, beto, tipo="temporal", dias=3)
+    assert created.status_code == 201, created.text
+    assert beto["id"] not in ids_of(client.get(f"{USERS}/suggestions", headers=ana["headers"]))
+    assert ids_of(cards()) == set()
+    assert client.get(f"{USERS}/athletes/{beto['id']}", headers=ana["headers"]).status_code == 404
+    clock.advance(days=4)  # the temporal sanction ended: back to normal
+    assert beto["id"] in ids_of(client.get(f"{USERS}/suggestions", headers=ana["headers"]))
+    assert ids_of(cards()) == {beto["id"]}
+
+
+def test_a_lifted_sanction_brings_the_account_back_and_a_permanent_one_keeps_it_out(clock):
+    client, _, admin, ana, beto = world()
+    first = sanction(client, admin, beto, tipo="permanente").json()
+    assert beto["id"] not in ids_of(client.get(f"{USERS}/suggestions", headers=ana["headers"]))
+    assert lift(client, admin, first["id"]).status_code == 200
+    assert beto["id"] in ids_of(client.get(f"{USERS}/suggestions", headers=ana["headers"]))

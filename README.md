@@ -215,10 +215,14 @@ que sin cambiar esos servicios: no se pueden enviar solicitudes ni mensajes, no 
 y el match desaparece de la lista de ambos. **Nada se borra:** al desbloquear, el chat vuelve con su
 historial. Esto reemplaza la regla de la HU-42 («el bloqueo no toca matches, chats ni actividades»).
 
-**`/blocks/check`.** Responde solo si existe un bloqueo, nunca quién lo puso, y solo a una de las dos
-personas (con su token) o a un administrador; cualquier otra cuenta recibe 403, para que nadie pueda
-averiguar quién bloqueó a quién. La persona bloqueada que consulta sí puede deducir que existe un
-bloqueo, así que quien lo use debe mostrar un mensaje genérico («no disponible»).
+**`/blocks/check`.** Responde solo si existe un bloqueo, nunca quién lo puso, y solo a un administrador (con su
+token) o a otro servicio con `X-Internal-Service-Token` (sin ese secreto configurado, 503). Ni siquiera las dos personas
+involucradas pueden consultarlo (403): la persona bloqueada se enteraría de que la bloquearon. El gateway no lo expone.
+
+**Cuentas suspendidas (HU-45) y contactables.** Una cuenta con sanción vigente no aparece en `GET /suggestions` ni en las
+tarjetas de deportista (`GET /athletes/{id}`, `POST /athletes/cards`), igual que una cuenta desactivada o bloqueada.
+La misma regla la expone `POST /internal/v1/accounts/{id}/contactable` (`{ids}` → `{ids}` de quienes esa persona puede
+contactar; solo red interna): ms-machine la usa para que `totalUnread` coincida con la lista de chats.
 
 **Silenciar no es bloquear.** Quien silencia sigue pudiendo recibir mensajes y ver a la otra persona;
 solo se guarda la lista (`silencio_usuario`, privada: la persona silenciada no se entera). Desde la

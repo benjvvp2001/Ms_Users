@@ -31,6 +31,11 @@ from app.schemas.audit import LEGACY_ACTIONS, AdminAuditEntry, AuditAction, Audi
 from app.schemas.user import ConsentCreate, ConsentRead, PreferencesReplace, ProfileReplace, ReportCreate
 
 
+def _now() -> datetime:
+    from app.services import sanction_service  # late import: the service module imports repositories
+    return sanction_service.utcnow()
+
+
 class MockUserRepository:
     """Temporary mock repository; replace it with the users database adapter."""
 
@@ -188,6 +193,8 @@ class MockUserRepository:
                 for user in reversed(self._users.values())
                 if user.id != exclude_user_id and user.email_verified and user.role in ATHLETE_ROLES
                 and user.preferences.disponibilidad_match
+                and not any(s.usuario_id == user.id and s.in_force_at(_now())
+                            for s in self._sanctions.values())
                 and (exclude_user_id, user.id) not in self._blocks
                 and (user.id, exclude_user_id) not in self._blocks
             ]

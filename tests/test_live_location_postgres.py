@@ -13,7 +13,7 @@ from app.repositories.postgres_user_repository import PostgresUserRepository
 from app.schemas.user import SuggestionFilters, UserSport, Zona
 
 MIGRATIONS = ("001_users_schema.sql", "004_email_verification.sql", "005_profile_goals_zone.sql",
-              "006_reports_blocks.sql", "008_current_location.sql")
+              "006_reports_blocks.sql", "008_current_location.sql", "012_sanciones.sql")
 SPORTS = [UserSport(deporte_codigo="running", nivel=3)]
 
 

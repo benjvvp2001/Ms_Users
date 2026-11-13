@@ -30,7 +30,8 @@ def directory():
             migrations = Path(__file__).parents[1] / 'db/migrations'
             for name in ('001_users_schema.sql', '004_email_verification.sql', '005_profile_goals_zone.sql',
                          '006_reports_blocks.sql', '008_current_location.sql', '009_reporte_rol.sql',
-                         '010_audit_admin.sql', '011_reporte_escalado.sql', '014_reporte_revision_autor.sql'):
+                         '010_audit_admin.sql', '011_reporte_escalado.sql', '012_sanciones.sql',
+                         '014_reporte_revision_autor.sql'):
                 setup.execute((migrations / name).read_text())
             pool = ConnectionPool(dsn, kwargs={'options': f'-c search_path={schema}'}, min_size=1, max_size=2)
             pool.wait()
@@ -117,3 +118,23 @@ def test_real_sql_hides_blocked_people_both_ways_and_stores_reports(directory):
     assert [r.id for r in repo.list_reports('pendiente', 10)] == [created.id]
     assert repo.review_report(created.id, 'descartado', other).estado == 'descartado'
     assert repo.list_reports('pendiente', 10) == []
+
+
+def test_real_sql_leaves_out_suspended_accounts(directory):
+    """HU-45: only a sanction in force hides an account; an ended or lifted one does not."""
+    repo, pool, add = directory
+    me, permanent, temporal, ended, lifted, plain = (add(None) for _ in range(6))
+    admin = add(None)
+    now = datetime.now(timezone.utc)
+    rows = [(permanent, 'permanente', None, 'activa', None),
+            (temporal, 'temporal', now + timedelta(days=2), 'activa', None),
+            (ended, 'temporal', now - timedelta(hours=1), 'activa', None),
+            (lifted, 'permanente', None, 'levantada', now - timedelta(days=1))]
+    with pool.connection() as conn:
+        for user, tipo, fin, estado, levantada in rows:
+            conn.execute("INSERT INTO sancion (id, usuario_id, tipo, motivo, inicio, fin, estado, levantada_en, admin_id) "
+                         "VALUES (gen_random_uuid(), %s, %s, 'Motivo de prueba', %s, %s, %s, %s, %s)",
+                         (user, tipo, now - timedelta(days=3), fin, estado, levantada, admin))
+    found = {c.id for c in repo.list_suggestion_candidates(exclude_user_id=me, limit=50, filters=SuggestionFilters(),
+                                                           origin=None, sports=[], fresh_since=FRESH)}
+    assert found == {admin, ended, lifted, plain}
